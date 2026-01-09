@@ -1,0 +1,3 @@
+John Doe, ML Engineer
+Experience: Led deep learning projects using Python and TensorFlow. Deployed models to AWS and GCP.
+Skills: Computer Vision, NLP, PyTorch.
