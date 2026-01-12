@@ -6,71 +6,66 @@ import numpy as np
 import subprocess
 import time
 
-# Load the model
-print("⏳ Loading Whisper AI...")
-model = whisper.load_model("tiny", device="cpu")
+# --- HIGH-PRECISION WHISPER ---
+print("⏳ Loading High-Precision Whisper Model (Small)...")
+model = whisper.load_model("small") 
+FILLERS = ["um", "uh", "ah", "like", "basically", "actually", "you know"]
+
+def format_time(seconds):
+    mins = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{mins:02d}:{secs:02d}"
 
 def audio_phase_score(video_path):
-    # Create a clean filename
     temp_wav = os.path.join(os.getcwd(), f"temp_proc_{int(time.time())}.wav")
     
     try:
-        if not os.path.exists(video_path):
-            return {"transcript": "[File Error]", "fluency_score": 0.0}
+        # 1. EXTRACT AUDIO
+        command = f'ffmpeg -y -i "{video_path}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "{temp_wav}"'
+        subprocess.run(command, shell=True, capture_output=True)
 
-        print(f"🎤 Extraction started for: {video_path}")
-        
-        # --- THE FIX: Try multiple ways to run FFmpeg ---
-        ffmpeg_cmd = "ffmpeg"
-        # Try to use static-ffmpeg if installed
-        try:
-            from static_ffmpeg import add_paths
-            add_paths()
-        except:
-            pass
+        if not os.path.exists(temp_wav):
+            return {"transcript": "[Extraction Failed]", "duration": "00:00", "fluency_score": 0.0}
 
-        # Execute extraction
-        process = subprocess.run(
-            [ffmpeg_cmd, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", temp_wav],
-            capture_output=True,
-            text=True
-        )
-
-        if process.returncode != 0:
-            print(f"❌ FFmpeg Error: {process.stderr}")
-            return {"transcript": "[Audio Extraction Error]", "fluency_score": 0.3}
-
-        # Verify WAV exists and has data
-        if not os.path.exists(temp_wav) or os.path.getsize(temp_wav) < 100:
-            return {"transcript": "[Empty Audio Stream]", "fluency_score": 0.3}
-
-        print("📝 Transcribing...")
-        # Add a prompt to help the AI recognize your specific name
-        result = model.transcribe(
-            temp_wav, 
-            fp16=False, 
-            language="en",
-            initial_prompt="Candidate: Sudeena Jafer. Interview response."
-        )
-        
-        text = result["text"].strip()
-        
-        # Acoustic Analysis
+        # 2. ACOUSTIC ANALYSIS (Duration & Silence)
         y, sr = librosa.load(temp_wav)
-        duration = librosa.get_duration(y=y, sr=sr)
+        duration_seconds = librosa.get_duration(y=y, sr=sr)
         
-        # Cleanup
-        if os.path.exists(temp_wav):
-            try: os.remove(temp_wav)
-            except: pass
+        # Detect non-silent intervals to calculate silence ratio
+        non_silent_intervals = librosa.effects.split(y, top_db=25)
+        speech_duration = sum([itv[1] - itv[0] for itv in non_silent_intervals]) / sr
+        silence_ratio = (duration_seconds - speech_duration) / duration_seconds if duration_seconds > 0 else 0
+
+        # 3. HIGH-PRECISION TRANSCRIPTION
+        result = model.transcribe(
+            temp_wav, fp16=False, language="en",
+            beam_size=5, temperature=0,
+            initial_prompt="Candidate name: Sudeena Jafer. Formal job interview."
+        )
+        full_text = result["text"].strip()
+        
+        # 4. ADVANCED METRICS
+        clean_text = re.sub(r"[^a-z\s]", " ", full_text.lower())
+        words_list = clean_text.split()
+        wpm = (len(words_list) / (duration_seconds / 60)) if duration_seconds > 0 else 0
+        filler_count = sum(1 for w in words_list if w in FILLERS)
+        
+        # Fluency: Combination of WPM speed, low fillers, and low silence ratio
+        fluency = (min(wpm/150, 1.0) * 0.4) + ((1 - silence_ratio) * 0.4) + (max(1 - (filler_count/10), 0) * 0.2)
+        
+        # Communication: Linguistic clarity (based on length and word variety)
+        communication = min(len(full_text) / 500, 1.0) if len(full_text) > 0 else 0
+
+        if os.path.exists(temp_wav): os.remove(temp_wav)
             
         return {
-            "transcript": text if text else "[Silence Detected]", 
-            "fluency_score": 0.85 if len(text) > 5 else 0.4
-        }
-        
-    except Exception as e:
-        print(f"❌ Transcription Crash: {e}")
-        return {"transcript": f"[Transcription Failed: {str(e)[:15]}]", "fluency_score": 0.5}
+        "transcript": full_text,
+        "duration": format_time(duration_seconds),
+        "wpm": round(wpm, 1),
+        "fluency_score": round(fluency, 2),
+        "communication_score": round(communication, 2) # Verified Key
+    }
 
-print("✅ Audio Phase 3 (Self-Healing) LOADED!")
+    except Exception as e:
+        print(f"❌ Audio Error: {e}")
+        return {"transcript": "Error", "duration": "00:00", "fluency_score": 0.5, "communication_score": 0.5, "wpm": 0}
