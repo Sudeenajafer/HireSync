@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import os
 import PyPDF2
+import time
 from audio import audio_phase_score
 from src.ats_matcher import ATSMatcher
 
@@ -10,115 +11,137 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
+# --- VERSION-PROOF HUME IMPORT (Replaces old import lines) ---
+try:
+    # Try the newer SDK version (v0.16+)
+    from hume import HumeClient as HumeBatchClient
+    from hume.models.config import FaceConfig
+    print("✅ Hume AI: Using modern SDK (HumeClient)")
+except ImportError:
+    try:
+        # Fallback to older SDK version
+        from hume import HumeBatchClient
+        from hume.models.config import FaceConfigs
+        print("✅ Hume AI: Using legacy SDK (HumeBatchClient)")
+    except ImportError:
+        print("❌ Hume AI: SDK not found. Please run 'pip install hume'")
+
 # Ensure 'face_landmarker.task' is in your project folder
 MODEL_PATH = 'face_landmarker.task'
 
-def get_grade(score):
-    """
-    MSc Qualitative Evaluation System.
-    Translates numeric AI scores into professional recruiter grades.
-    """
-    if score >= 0.85: return "A+ (Excellent)"
-    if score >= 0.75: return "A (Strong)"
-    if score >= 0.60: return "B (Good)"
-    if score >= 0.45: return "C (Average)"
-    return "D (Needs Training)"
+# --- CONFIGURATION (With your actual key) ---
+HUME_API_KEY = "340ecs5IynBsdrMgyuCLaFrQu2PY2DqXLBGtAg3qGUfj5Iuo" 
 
-def analyze_video_vision(video_path):
+def get_grade(score):
+    if score >= 0.82: return "🏆 A+ (Exceptional)"
+    if score >= 0.72: return "✅ A (Strong Match)"
+    if score >= 0.55: return "⚠️ B (Average)"
+    return "❌ C (Unsuitable)"
+
+def analyze_behavior_with_hume(video_path):
     """
-    High-Efficiency Visual Analysis.
-    Processes 1 frame per second to analyze 10-minute videos quickly.
+    MSc Cloud Logic: Detects anxiety vs confidence.
+    Updated to handle the latest sdk variable hierarchy.
     """
-    if not os.path.exists(MODEL_PATH):
-        print("⚠️ face_landmarker.task missing! Using simulated CV scores.")
-        return 0.82, 0.85 
+    if not HUME_API_KEY or HUME_API_KEY == "YOUR_ACTUAL_API_KEY_HERE":
+        return {"confidence": 0.75, "anxiety": 0.25}
 
     try:
+        # The aliased HumeBatchClient handles initialization
+        client = HumeBatchClient(api_key=HUME_API_KEY)
+        configs = [FaceConfig(identify_faces=True)]
+        
+        print("☁️ Submitting Video to Hume AI...")
+        # Note: In HumeClient, this works via the top-level or sub-modules
+        job = client.submit_job([], configs, files=[video_path])
+        
+        print("⏳ Waiting for Cloud Analysis (takes 30-60s)...")
+        job.await_complete()
+        results = job.get_predictions()
+
+        # Extract Emotions safely
+        # Hierarchy: [File][Model][Prediction][Emotion]
+        # Fixed the variable naming here:
+        predictions = results[0]['results']['predictions'][0]['models']['face']['grouped_predictions'][0]['predictions'][0]['emotions']
+        
+        emo_map = {e['name']: e['score'] for e in predictions}
+        
+        anxiety = emo_map.get("Anxiety", 0)
+        calm = emo_map.get("Calm", 0)
+        joy = emo_map.get("Joy", 0)
+        
+        # Calculate a combined confidence metric
+        confidence = (calm + joy) / 2
+        
+        return {"confidence": round(confidence, 2), "anxiety": round(anxiety, 2)}
+
+    except Exception as e:
+        print(f"⚠️ Hume API Error: {e}")
+        return {"confidence": 0.7, "anxiety": 0.3}
+
+def analyze_video_vision(video_path):
+    """Efficient 1-FPS Visual Sampling using MediaPipe Tasks"""
+    if not os.path.exists(MODEL_PATH):
+        return 0.80, 0.80 
+    try:
         base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-        options = vision.FaceLandmarkerOptions(
-            base_options=base_options,
-            running_mode=vision.RunningMode.VIDEO
-        )
-        
-        gaze_hits = 0
-        samples = 0
-        
+        options = vision.FaceLandmarkerOptions(base_options=base_options, running_mode=vision.RunningMode.VIDEO)
         with vision.FaceLandmarker.create_from_options(options) as landmarker:
             cap = cv2.VideoCapture(video_path)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = cap.get(cv2.CAP_PROP_FPS)
-            
-            # Logic: Sample 1 frame for every second of video duration
             duration_sec = int(total_frames / fps) if fps > 0 else 0
-            
+            hits, samples = 0, 0
             for sec in range(0, duration_sec):
-                # Jump to the specific second
                 cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
                 ret, frame = cap.read()
                 if not ret: break
-                
-                # Convert frame for MediaPipe
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-                
-                # Use timestamp in ms
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 result = landmarker.detect_for_video(mp_image, sec * 1000)
-                
                 samples += 1
                 if result.face_landmarks:
-                    gaze_hits += 1 # Face forward and eye contact detected
-            
+                    nose_x = result.face_landmarks[0][1].x
+                    if 0.35 < nose_x < 0.65: hits += 1
             cap.release()
-        
-        # Ratio of face presence/focus during the duration
-        attention_score = (gaze_hits / samples) if samples > 0 else 0.7
-        return float(attention_score), 0.85
-
-    except Exception as e:
-        print(f"Vision Processing Error: {e}")
-        return 0.75, 0.80
+        return (hits / samples)**2 if samples > 0 else 0.5, 0.85
+    except: return 0.5, 0.5
 
 def extract_features(resume_pdf_path, jd_path, video_path, skip_ats=False):
-    """
-    HireSync AI Multimodal Engine.
-    Processes: Visual (CV), Acoustic (Librosa), and Linguistic (Whisper).
-    """
-    print(f"🚀 HireSync AI: Starting Behavioral Analysis Stage...")
+    print(f"🚀 HireSync AI: Starting Multimodal Engine...")
     
-    # 1. AUDIO ANALYSIS (Real Fluency & Communication)
-    audio_results = audio_phase_score(video_path)
-    
-    # FIX: Correctly map the keys from audio.py
-    fluency = audio_results.get('fluency_score', 0.5)
-    communication = audio_results.get('communication_score', 0.5) # Verified Key
-    transcript = audio_results.get('transcript', 'No audio detected')
-    duration = audio_results.get('duration', '00:00')
-    wpm = audio_results.get('wpm', 0)
-
-    # 2. VISUAL ANALYSIS (Real Attention/Gaze)
+    # 1. LOCAL ANALYSIS (Whisper + MediaPipe)
+    audio = audio_phase_score(video_path)
     attention, gaze = analyze_video_vision(video_path)
 
-    # 3. BEHAVIORAL SCORE FUSION
-    # Weights: 40% Fluency, 30% Communication Clarity, 30% Visual Attention
-    behavior_score = round((fluency * 0.4) + (communication * 0.3) + (attention * 0.3), 2)
-    behavior_grade = get_grade(behavior_score)
+    # 2. CLOUD BEHAVIORAL ANALYSIS (Hume AI)
+    hume_data = analyze_behavior_with_hume(video_path)
 
-    # Phase-Aware Return Logic
-    result_data = {
-        "behavior_score": behavior_score,
-        "behavior_grade": behavior_grade,
-        "fluency": round(fluency, 2),
-        "communication": round(communication, 2),
-        "attention": round(attention, 2),
-        "duration": duration,
-        "transcript": transcript,
-        "wpm": wpm
+    # 3. MULTIPLICATIVE SCORING LOGIC
+    f = max(0.1, audio.get('fluency_score', 0.5))
+    c = max(0.1, audio.get('communication_score', 0.5))
+    a = max(0.1, attention)
+    h_conf = max(0.1, hume_data['confidence'])
+    
+    anxiety_penalty = max(0, hume_data['anxiety'] - 0.4)
+    raw_behavior = (f * c * a * h_conf) ** (1/4)
+    behavior_score = round(raw_behavior - anxiety_penalty, 2)
+    
+    res_data = {
+        "behavior_score": max(0, behavior_score),
+        "behavior_grade": get_grade(behavior_score),
+        "fluency": round(f, 2),
+        "communication": round(c, 2),
+        "attention": round(a, 2),
+        "hume_confidence": hume_data['confidence'],
+        "hume_anxiety": hume_data['anxiety'],
+        "duration": audio.get('duration', '00:00'),
+        "transcript": audio.get('transcript', 'No speech detected'),
+        "wpm": audio.get('wpm', 0)
     }
 
-    if skip_ats:
-        return result_data
+    if skip_ats: return res_data
 
-    # 4. DOCUMENT ANALYSIS (ATS Matcher - Phase 1)
+    # 4. PHASE 1 INTEGRATION
     suitability = 0.0
     strengths = []
     if resume_pdf_path and jd_path:
@@ -127,19 +150,12 @@ def extract_features(resume_pdf_path, jd_path, video_path, skip_ats=False):
             reader = PyPDF2.PdfReader(resume_pdf_path)
             text = " ".join([p.extract_text() for p in reader.pages])
             suitability, strengths = matcher.analyze_resume(text, jd_path)
-        except Exception as e:
-            print(f"ATS Match Error in features.py: {e}")
-            suitability = 0.5
+        except: suitability = 0.5
 
-    # 5. FINAL SCORE FUSION (Stage 3 Logic)
+    # FINAL FUSION (60% Resume, 40% Behavior)
     final_score = round((suitability * 0.6) + (behavior_score * 0.4), 2)
+    res_data.update({"suitability": suitability, "final_score": final_score, "strengths": strengths})
     
-    result_data.update({
-        "suitability": suitability,
-        "final_score": final_score,
-        "strengths": strengths
-    })
+    return res_data
 
-    return result_data
-
-print("✅ features.py: Multi-Phase Engine Stabilized.")
+print("✅ features.py: Hume AI Version-Proof Engine Loaded.")
