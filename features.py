@@ -36,7 +36,6 @@ def get_grade(score):
     return "❌ C (Unsuitable)"
 
 def analyze_behavior_with_hume(video_path):
-    """MSc Logic: Affective Computing via Hume AI"""
     # 1. Fallback if SDK is missing or Key is default
     if not HUME_AVAILABLE or HUME_API_KEY == os.getenv("HUME_API_KEY"):
         return {"confidence": 0.75, "anxiety": 0.25}
