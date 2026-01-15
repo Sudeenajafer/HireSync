@@ -11,6 +11,20 @@ class ATSMatcher:
     def __init__(self):
         self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+    def generate_questions(self, jd_text):
+        """MSc Logic: Gemini-driven adaptive interview question generation"""
+        prompt = f"""
+        Based on the following Job Description, generate 3 professional behavioral interview questions 
+        that will test the candidate's technical and soft skills.
+        Format the output as a simple numbered list.
+        JD: {jd_text[:2000]}
+        """
+        try:
+            response = self.client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+            return response.text.strip()
+        except:
+            return "1. Tell us about your experience.\n2. How do you handle challenges?\n3. Why do you want this role?"
+
     def validate_name(self, name):
         if not name or len(name.split()) < 2: 
             return False, "🛑 Please enter both First and Last name."
@@ -21,6 +35,7 @@ class ATSMatcher:
         if not any(m in text.lower() for m in markers):
             return False, "🛑 This PDF doesn't look like a resume."
         return True, ""
+
 
     def analyze_resume_llm(self, resume_text, jd_text):
         print("🚀 [API DEBUG] Calling Modern Google GenAI (Gemini 1.5)...")
