@@ -69,7 +69,7 @@ def run_interview_stage(video_input):
         html = f"""
         <div style="background:#0f172a; padding:20px; border-radius:15px; border:2px solid {color}; max-width:500px;">
             <div style="display:flex; justify-content:space-between; color:white; margin-bottom:10px;">
-                <h3 style="color:#38bdf8; margin:0;">MSc Assessment</h3>
+                <h3 style="color:#38bdf8; margin:0;">Behavioral Analysis</h3>
                 <span style="background:#334155; padding:3px 10px; border-radius:10px; font-size:11px;">⏱️ {res['duration']}</span>
             </div>
             <div style="background:#1e293b; padding:15px; border-radius:12px; text-align:center; margin-bottom:15px;">
@@ -103,7 +103,8 @@ def generate_final_report(name, ats, behavior):
 # --- UI LAYOUT ---
 compact_css = ".gradio-container { max-width: 900px !important; margin: auto !important; }"
 
-with gr.Blocks(theme=gr.themes.Soft(), css=compact_css, title="HireSync AI") as demo:
+
+with gr.Blocks(title="HireSync AI") as demo:
     ats_score = gr.State(0); int_score = gr.State(0)
     gr.Markdown("<h1 style='text-align:center; color:#38bdf8;'>🤖 HireSync AI Pipeline</h1>")
     
@@ -130,10 +131,19 @@ with gr.Blocks(theme=gr.themes.Soft(), css=compact_css, title="HireSync AI") as 
         with gr.TabItem("📊 Stage 3: Report"):
             btn3 = gr.Button("🏆 GENERATE FINAL SCORECARD", variant="primary")
             out3 = gr.HTML()
+            pass
 
     btn1.click(run_ats_stage, [res_in, jd_in, name_in], [out1, ats_score])
     btn2.click(run_interview_stage, [vid_in], [out2, int_score, dur_label])
     btn3.click(generate_final_report, [name_in, ats_score, int_score], [out3])
 
 if __name__ == "__main__":
-    demo.queue().launch(inbrowser=True, inline=False, share=True)
+    # FIX: Moved theme and css to launch() to satisfy Gradio 6.0
+    demo.queue().launch(
+        theme=gr.themes.Soft(), 
+        css=compact_css,
+        inbrowser=True, 
+        inline=False,
+        share=True
+    )
+

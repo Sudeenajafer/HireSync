@@ -8,3 +8,17 @@ __pycache__/
 *.csv
 .DS_Store
 "@ | Out-File .gitignore -Encoding utf8
+env/
+
+
+*.wav
+*.mp4
+*.webm
+audio_extract_*.wav
+v_audio_*.wav
+
+# AI Models (too big for GitHub)
+face_landmarker.task
+
+# Gradio cache
+gradio_cached/
