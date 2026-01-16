@@ -22,3 +22,9 @@ def run_hr_ats(name, res_file, jd_file, matcher): # <--- REMOVED create_chart_fn
         <p style='color:#22c55e;'>✅ Data Saved. Redirecting to Stage 2...</p>
     </div>"""
     return html, chart, res['final_score'], gr.Tabs(selected=1)
+
+
+def get_cloud_applicants():
+    # Fetch from Supabase instead of SQLite
+    response = supabase.table("candidates").select("*").order("created_at", desc=True).execute()
+    return pd.DataFrame(response.data)
