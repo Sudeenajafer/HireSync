@@ -38,17 +38,34 @@ class ATSMatcher:
 
 
     def analyze_resume_llm(self, resume_text, jd_text):
-        print("🚀 [API DEBUG] Calling Modern Google GenAI (Gemini 1.5)...")
-        
+        """
+        MSc XAI Logic: Deep Semantic ATS Analysis with Explainable Breakdown.
+        """
         prompt = f"""
-        Act as an expert ATS. Analyze the Resume against the JD.
+        Act as an expert Recruiter. Compare the Resume against the Job Description.
+        
+        RULES:
+        1. All scores must be between 0 and 100.
+        2. Total score cannot exceed 100.
+        3. Provide specific evidence for the scores.
+
         Return ONLY a JSON object:
         {{
-            "education_score": int, "skills_score": int, "experience_score": int,
-            "final_score": int, "matched_skills": [], "missing_skills": [],
-            "reasoning": "str", "suggestions": "str"
+            "education_score": int,
+            "skills_score": int,
+            "experience_score": int,
+            "final_score": int,
+            "matched_keywords": ["skill1", "skill2"],
+            "missing_keywords": ["skillA"],
+            "explanation": {{
+                "strengths": "Why the score is high in certain areas",
+                "weaknesses": "Specific gaps found",
+                "verdict": "One sentence summary of fit"
+            }}
         }}
-        Resume: {resume_text[:5000]} | JD: {jd_text[:3000]}
+
+        Resume: {resume_text[:5000]}
+        JD: {jd_text[:3000]}
         """
         try:
             response = self.client.models.generate_content(
@@ -56,9 +73,14 @@ class ATSMatcher:
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            return json.loads(response.text)
+            data = json.loads(response.text)
+            
+            # --- XAI SAFETY GATE ---
+            # Ensures the AI never returns a score > 100
+            data['final_score'] = min(int(data.get('final_score', 0)), 100)
+            return data
         except Exception as e:
-            print(f"Gemini SDK Error: {e}")
+            print(f"Gemini Error: {e}")
             return None
         
         

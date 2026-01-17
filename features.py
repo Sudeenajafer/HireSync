@@ -9,11 +9,12 @@ from supabase import create_client
 from audio import audio_phase_score
 from src.ats_matcher import ATSMatcher
 from dotenv import load_dotenv
+from textblob import TextBlob  # New: For Sentiment Analysis
 
 # --- 1. ENVIRONMENT & CLOUD CONFIGURATION ---
 load_dotenv()
 
-# Explicit Cloudinary Configuration (Fixes "Must supply api_key" error)
+# Explicit Cloudinary Configuration
 cloudinary.config(
     cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key = os.getenv("CLOUDINARY_API_KEY"),
@@ -35,55 +36,91 @@ try:
     from hume import HumeClient
     from hume.models.config import FaceConfig
     HUME_AVAILABLE = True
+    print("✅ Hume AI SDK detected.")
 except ImportError:
     HUME_AVAILABLE = False
+    print("⚠️ Hume AI SDK missing. Running in Local-Only mode.")
 
 MODEL_PATH = 'face_landmarker.task'
 HUME_API_KEY = os.getenv("HUME_API_KEY")
 
-# --- 3. CLOUD UTILITY FUNCTIONS ---
+# --- 3. PHASE 5: DISCREPANCY DETECTION LOGIC ---
+
+def detect_discrepancies(transcript, confidence, anxiety, attention):
+    """
+    MSc Phase 5 Logic: Cross-Modal Conflict Detection.
+    Compares Verbal Sentiment (NLP) vs. Physical Biometrics (CV/Affective).
+    """
+    if not transcript or transcript == "No speech detected" or len(transcript.split()) < 4:
+        return "Insufficient speech data for integrity check.", "Low"
+
+    # 1. Calculate Verbal Sentiment (Normalized to 0.0 - 1.0)
+    # Polarity: -1 (Negative) to 1 (Positive)
+    blob = TextBlob(transcript)
+    sentiment = (blob.sentiment.polarity + 1) / 2
+    
+    warnings = []
+    severity = "Safe"
+
+    # 2. Logic: High Sentiment vs. Physical Anxiety (The Stress-Logic Gap)
+    if sentiment > 0.75 and anxiety > 0.55:
+        warnings.append("Cognitive Dissonance: Verbal sentiment is highly positive, but facial anxiety levels are elevated.")
+        severity = "High"
+
+    # 3. Logic: Confident Words vs. Low Visual Attention (The Focus Gap)
+    if confidence > 0.70 and attention < 0.45:
+        warnings.append("Engagement Conflict: High vocal confidence but low visual focus/eye contact.")
+        if severity != "High": severity = "Medium"
+
+    # 4. Logic: Low Sentiment vs. High Confidence (The Modesty Check)
+    if sentiment < 0.35 and confidence > 0.80:
+        warnings.append("Tonal Dissonance: Professional but cautious vocabulary paired with high physical composure.")
+        if severity == "Safe": severity = "Low"
+
+    if not warnings:
+        return "No significant behavioral discrepancies detected. Visual and verbal cues are aligned.", "Safe"
+    
+    return " | ".join(warnings), severity
+
+# --- 4. CLOUD UTILITY FUNCTIONS ---
 
 def upload_to_cloud(file_path, resource_type="auto"):
     """
-    MSc Robustness: Uploads assets to Cloudinary with explicit error handling.
-    resource_type should be 'video' for recordings and 'raw' for PDFs.
+    MSc Robustness: Uploads assets to Cloudinary.
+    Fix: Treats PDFs as 'image' to bypass Cloudinary 'untrusted' raw delivery block.
     """
     try:
         if not file_path or not os.path.exists(file_path):
-            print(f"❌ File not found for upload: {file_path}")
             return None
             
-        print(f"☁️ Cloudinary: Uploading {resource_type} from {os.path.basename(file_path)}...")
+        # Determine type based on extension
+        # For viewing PDFs in browser easily, 'image' resource type is preferred by Cloudinary
+        target_type = "image" if file_path.lower().endswith(".pdf") else "video"
+        
+        print(f"☁️ Cloudinary: Uploading {target_type} from {os.path.basename(file_path)}...")
         
         response = cloudinary.uploader.upload(
             file_path, 
-            resource_type=resource_type,
-            chunk_size=6000000 # 6MB chunks for video stability
+            resource_type=target_type,
+            chunk_size=6000000 
         )
         
-        url = response.get('secure_url')
-        print(f"✅ Cloudinary Success: {url}")
-        return url
-        
+        return response.get('secure_url')
     except Exception as e:
-        print(f"❌ CRITICAL CLOUDINARY ERROR: {e}")
+        print(f"❌ Cloudinary Error: {e}")
         return None
 
 def save_candidate_to_supabase(candidate_data):
-    """
-    Persists evaluation metadata and asset links to the PostgreSQL database.
-    """
     if not supabase:
-        print("⚠️ Supabase not configured. Skipping database save.")
+        print("⚠️ Supabase missing. Skipping database save.")
         return
     try:
-        print(f"💾 Supabase: Saving record for {candidate_data.get('name')}...")
         supabase.table("candidates").insert(candidate_data).execute()
         print("✅ Database Synchronized.")
     except Exception as e:
-        print(f"❌ SUPABASE SAVE ERROR: {e}")
+        print(f"❌ Supabase Save Error: {e}")
 
-# --- 4. BEHAVIORAL ANALYSIS HELPERS ---
+# --- 5. BEHAVIORAL ANALYSIS HELPERS ---
 
 def get_grade(score):
     if score >= 0.80: return "🏆 A+ (Elite Match)"
@@ -92,7 +129,6 @@ def get_grade(score):
     return "❌ F (Rejected)"
 
 def analyze_behavior_with_hume(video_path):
-    """MSc Logic: Affective computing to determine stress and confidence."""
     if not HUME_AVAILABLE or not HUME_API_KEY:
         return {"confidence": 0.75, "anxiety": 0.25}
     try:
@@ -101,19 +137,14 @@ def analyze_behavior_with_hume(video_path):
         job = client.submit_job([], configs, files=[video_path])
         job.await_complete()
         results = job.get_predictions()
-        
-        # Fixed hierarchy parsing
         predictions = results[0]['results']['predictions'][0]['models']['face']['grouped_predictions'][0]['predictions'][0]['emotions']
         emo_map = {e['name']: e['score'] for e in predictions}
-        
         confidence = (emo_map.get("Calm", 0) + emo_map.get("Joy", 0)) / 2
         return {"confidence": round(confidence, 2), "anxiety": round(emo_map.get("Anxiety", 0), 2)}
-    except Exception as e:
-        print(f"⚠️ Hume API Error: {e}")
+    except:
         return {"confidence": 0.60, "anxiety": 0.40}
 
 def analyze_video_vision(video_path):
-    """Efficient Temporal Sampling (1 FPS) using MediaPipe."""
     if not os.path.exists(MODEL_PATH): return 0.5 
     try:
         base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
@@ -138,29 +169,36 @@ def analyze_video_vision(video_path):
         return round(float(attention), 2)
     except: return 0.2
 
-# --- 5. MAIN MULTIMODAL ENGINE ---
+# --- 6. MAIN MULTIMODAL ENGINE ---
 
 def extract_features(resume_path, jd_text, video_path, skip_ats=False):
     """
-    Main Entry Point: Fuses Local & Cloud AI signals.
+    Main Entry Point: Fuses Local & Cloud AI signals with Discrepancy Detection.
     """
-    print(f"🚀 HireSync Engine: Analyzing Behavioral Biometrics...")
+    print(f"🚀 HireSync Engine: Analyzing Behavioral Biometrics & Integrity...")
     
-    # Run Local and Cloud Streams
+    # 1. Run Local and Cloud Streams
     audio = audio_phase_score(video_path)
     attention = analyze_video_vision(video_path)
     hume_data = analyze_behavior_with_hume(video_path)
 
-    # Multiplicative Scoring Logic (MSc Standard)
+    # 2. Multiplicative Scoring Logic
     f = max(0.01, audio.get('fluency_score', 0.5))
     c = max(0.01, audio.get('communication_score', 0.5))
     a = max(0.01, attention)
     h = max(0.01, hume_data['confidence'])
     
-    # Calculate Anxiety Penalty
     anx_p = max(0, hume_data['anxiety'] - 0.4)
     behavior_score = round(((f * c * a * h) ** (1/4)) - anx_p, 2)
     behavior_score = max(0.05, behavior_score)
+
+    # 3. NEW: Run Cross-Modal Discrepancy Analysis (Phase 5)
+    conflict_msg, conflict_level = detect_discrepancies(
+        audio['transcript'], 
+        hume_data['confidence'], 
+        hume_data['anxiety'], 
+        attention
+    )
 
     res_data = {
         "behavior_score": behavior_score,
@@ -172,12 +210,14 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False):
         "hume_anxiety": hume_data['anxiety'],
         "duration": audio.get('duration', '00:00'),
         "transcript": audio.get('transcript', 'No speech detected'),
-        "wpm": audio.get('wpm', 0)
+        "wpm": audio.get('wpm', 0),
+        "conflict_report": conflict_msg,  # Phase 5 Output
+        "integrity_status": conflict_level # Phase 5 Output
     }
 
     if skip_ats: return res_data
 
-    # Resume Stage (Phase 1)
+    # 4. Resume Stage (Phase 1)
     suitability = 0.0
     strengths = []
     if resume_path and jd_text:
@@ -192,7 +232,7 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False):
             print(f"⚠️ ATS processing error: {e}")
             suitability = 0.5
 
-    # Final Overall Score (Weighted 60/40)
+    # 5. Final Overall Score (Weighted 60/40)
     final_score = round((suitability * 0.6) + (behavior_score * 0.4), 2)
     res_data.update({
         "suitability": suitability, 
@@ -202,4 +242,4 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False):
     
     return res_data
 
-print("✅ features.py: High-Stability Cloud Engine LOADED.")
+print("✅ features.py: High-Stability Cloud Engine with Phase 5 LOADED.")

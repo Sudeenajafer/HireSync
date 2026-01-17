@@ -11,6 +11,29 @@ load_dotenv()
 # --- 1. LOCAL SQLITE CONFIG (For Job Positions) ---
 LOCAL_DB = "hiresync_local.db"
 
+def get_candidates_by_role(role_title):
+    """
+    MSc Logic: Role-based data isolation.
+    Filters the Supabase table to return only applicants for a specific vacancy.
+    """
+    if not supabase: return pd.DataFrame()
+    try:
+        response = supabase.table("candidates")\
+            .select("name, role, final_score, created_at")\
+            .eq("role", role_title)\
+            .order("created_at", desc=True)\
+            .execute()
+        
+        df = pd.DataFrame(response.data)
+        if not df.empty:
+            df.columns = ["Name", "Role", "Score", "Date Applied"]
+            df["Deep Analysis"] = "🔍 VIEW DETAILS"
+        return df
+    except Exception as e:
+        print(f"Filter Error: {e}")
+        return pd.DataFrame()
+    
+    
 def init_local_db():
     """Initializes the local database for storing Job Descriptions."""
     conn = sqlite3.connect(LOCAL_DB)
@@ -96,13 +119,16 @@ else:
     print("⚠️ Warning: Supabase credentials missing from .env")
 
 def get_cloud_candidates_df():
-    """Fetches applicant summary from Supabase for the HR Table."""
+    """Fetches applicant summary and appends a 'Deep View' action column."""
     if not supabase: return pd.DataFrame(columns=["Error"], data=[["Supabase Not Connected"]])
     try:
         response = supabase.table("candidates").select("name, role, final_score, created_at").order("created_at", desc=True).execute()
         df = pd.DataFrame(response.data)
         if not df.empty:
-            df.columns = ["Name", "Role", "Overall Fit", "Date Applied"]
+            # 1. Format columns
+            df.columns = ["Name", "Role", "Score", "Date Applied"]
+            # 2. Add the 'Button' column as the last field
+            df["Deep Analysis"] = "🔍 VIEW DETAILS" 
         return df
     except Exception as e:
         print(f"Supabase Table Error: {e}")
@@ -117,6 +143,9 @@ def get_candidate_details(name):
     except Exception as e:
         print(f"Details Fetch Error: {e}")
         return None
+
+
+
 
 # Initialize the local database file immediately on run
 init_local_db()
