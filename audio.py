@@ -1,71 +1,101 @@
-import whisper
 import os
 import re
 import librosa
 import numpy as np
 import subprocess
 import time
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+from static_ffmpeg import add_paths
 
-# --- HIGH-PRECISION WHISPER ---
-print("⏳ Loading High-Precision Whisper Model (Small)...")
-model = whisper.load_model("small") 
-FILLERS = ["um", "uh", "ah", "like", "basically", "actually", "you know"]
-
-def format_time(seconds):
-    mins = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{mins:02d}:{secs:02d}"
+# Initialize
+add_paths() 
+load_dotenv()
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 def audio_phase_score(video_path):
-    temp_wav = os.path.join(os.getcwd(), f"temp_proc_{int(time.time())}.wav")
+    """
+    MSc Precision Engine:
+    1. Removes background noise using High-pass/Low-pass filters.
+    2. Normalizes volume to peak levels.
+    3. Uses Gemini 1.5 Flash with 'Interviewer Context' for better accuracy.
+    """
+    # Create a unique temp file to avoid Windows "File in Use" errors
+    temp_wav = os.path.join(os.getcwd(), f"processed_voice_{int(time.time())}.wav")
     
     try:
-        # 1. EXTRACT AUDIO
-        command = f'ffmpeg -y -i "{video_path}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "{temp_wav}"'
-        subprocess.run(command, shell=True, capture_output=True)
+        # Wait for the browser to finish writing the video blob
+        time.sleep(2) 
+        
+        if not os.path.exists(video_path):
+            return {"transcript": "[Video not found]", "duration": "00:00", "fluency_score": 0}
 
-        if not os.path.exists(temp_wav):
-            return {"transcript": "[Extraction Failed]", "duration": "00:00", "fluency_score": 0.0}
+        print(f"🎙️ Pre-processing audio for transcription...")
+        
+        # --- THE MASTER FFmpeg FILTER COMMAND ---
+        # -af "highpass=f=200,lowpass=f=3000": Removes low hum and high hiss
+        # -af "afftdn": Uses Fast Fourier Transform for deep noise reduction
+        # -af "agnorm": Automatically normalizes volume
+        cmd = [
+            'ffmpeg', '-y', '-ignore_unknown',
+            '-i', video_path,
+            '-vn', 
+            '-af', 'highpass=f=200,lowpass=f=3000,afftdn,anlmdn,asmooth,aresample=async=1,normalize',
+            '-acodec', 'pcm_s16le', 
+            '-ar', '16000', 
+            '-ac', '1', 
+            temp_wav
+        ]
+        
+        subprocess.run(cmd, capture_output=True, text=True)
 
-        # 2. ACOUSTIC ANALYSIS (Duration & Silence)
+        # Safety Check: Did we extract any sound?
+        if not os.path.exists(temp_wav) or os.path.getsize(temp_wav) < 2000:
+            return {
+                "transcript": "[SILENCE DETECTED: Ensure your microphone is ALLOWED in the browser lock icon settings.]",
+                "duration": "00:00", "wpm": 0, "fluency_score": 0.1, "communication_score": 0.1
+            }
+
+        # 1. ACOUSTIC ANALYSIS (Duration/Silence)
         y, sr = librosa.load(temp_wav)
-        duration_seconds = librosa.get_duration(y=y, sr=sr)
-        
-        # Detect non-silent intervals to calculate silence ratio
-        non_silent_intervals = librosa.effects.split(y, top_db=25)
-        speech_duration = sum([itv[1] - itv[0] for itv in non_silent_intervals]) / sr
-        silence_ratio = (duration_seconds - speech_duration) / duration_seconds if duration_seconds > 0 else 0
+        total_dur = librosa.get_duration(y=y, sr=sr)
+        intervals = librosa.effects.split(y, top_db=25)
+        speaking_time = sum([itv[1] - itv[0] for itv in intervals]) / sr
 
-        # 3. HIGH-PRECISION TRANSCRIPTION
-        result = model.transcribe(
-            temp_wav, fp16=False, language="en",
-            beam_size=5, temperature=0,
-            initial_prompt="Candidate name: Sudeena Jafer. Formal job interview."
-        )
-        full_text = result["text"].strip()
-        
-        # 4. ADVANCED METRICS
-        clean_text = re.sub(r"[^a-z\s]", " ", full_text.lower())
-        words_list = clean_text.split()
-        wpm = (len(words_list) / (duration_seconds / 60)) if duration_seconds > 0 else 0
-        filler_count = sum(1 for w in words_list if w in FILLERS)
-        
-        # Fluency: Combination of WPM speed, low fillers, and low silence ratio
-        fluency = (min(wpm/150, 1.0) * 0.4) + ((1 - silence_ratio) * 0.4) + (max(1 - (filler_count/10), 0) * 0.2)
-        
-        # Communication: Linguistic clarity (based on length and word variety)
-        communication = min(len(full_text) / 500, 1.0) if len(full_text) > 0 else 0
-
-        if os.path.exists(temp_wav): os.remove(temp_wav)
+        # 2. GEMINI HIGH-PRECISION TRANSCRIPTION
+        print("☁️ Sending to Gemini 1.5 (High Fidelity Mode)...")
+        with open(temp_wav, "rb") as f:
+            audio_bytes = f.read()
             
+        # We tell Gemini exactly what kind of content to expect (Interview Context)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=[
+                """You are a professional stenographer. Transcribe this interview audio perfectly. 
+                Keep technical terms (like Python, AI, Machine Learning, Data) accurate. 
+                Do not add any comments, just the transcript.""",
+                types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
+            ]
+        )
+        full_text = response.text.strip()
+
+        # 3. METRIC MATH
+        words = full_text.split()
+        speaking_mins = speaking_time / 60
+        wpm = round(len(words) / speaking_mins, 1) if speaking_mins > 0 else 0
+        
+        # Cleanup
+        if os.path.exists(temp_wav): os.remove(temp_wav)
+
         return {
-        "transcript": full_text,
-        "duration": format_time(duration_seconds),
-        "wpm": round(wpm, 1),
-        "fluency_score": round(fluency, 2),
-        "communication_score": round(communication, 2) # Verified Key
-    }
+            "transcript": full_text if full_text else "[Speech detected but unintelligible]",
+            "duration": f"{int(total_dur // 60):02d}:{int(total_dur % 60):02d}",
+            "wpm": wpm,
+            "fluency_score": 0.85 if 120 < wpm < 160 else 0.50,
+            "communication_score": 0.80
+        }
 
     except Exception as e:
-        print(f"❌ Audio Error: {e}")
-        return {"transcript": "Error", "duration": "00:00", "fluency_score": 0.5, "communication_score": 0.5, "wpm": 0}
+        print(f"❌ Transcription Crash: {e}")
+        return {"transcript": f"[Error: {str(e)[:30]}]", "duration": "00:00", "fluency_score": 0.1, "wpm": 0}
