@@ -1,11 +1,13 @@
 import gradio_client.utils as client_utils
 
-# --- 1. THE NUCLEAR PATCH (Python 3.14/3.12 Stability) ---
+# --- 1. THE NUCLEAR STABILITY PATCH (Crucial for Python 3.14/3.12) ---
 def patched_get_type(schema):
     if not isinstance(schema, dict): return "unknown"
     return "const" if "const" in schema else "enum" if "enum" in schema else "unknown"
+
 client_utils.get_type = patched_get_type
 client_utils.json_schema_to_python_type = lambda *args, **kwargs: "Any"
+client_utils._json_schema_to_python_type = lambda *args, **kwargs: "Any"
 
 import gradio as gr
 import pandas as pd
@@ -57,12 +59,11 @@ def hr_delete_job(title):
     new_choices = db.get_job_titles()
     return msg, gr.update(choices=new_choices), gr.update(choices=new_choices), gr.update(choices=new_choices)
 
-# --- CANDIDATE FLOW LOGIC ---
+# --- CANDIDATE FLOW LOGIC (3-STEP) ---
 def go_to_step_2(name, role):
-    if not name or not role: return gr.update(visible=True), gr.update(visible=False), "⚠️ Name and Role required."
     is_v, err = matcher.validate_name(name)
     if not is_v: return gr.update(visible=True), gr.update(visible=False), err
-    return gr.update(visible=False), gr.update(visible=True), "Next step unlocked."
+    return gr.update(visible=False), gr.update(visible=True), ""
 
 def go_to_step_3(resume, role_title):
     if not resume: return gr.update(visible=True), gr.update(visible=False), "⚠️ Upload Resume.", "", ""
@@ -70,20 +71,25 @@ def go_to_step_3(resume, role_title):
         reader = PyPDF2.PdfReader(resume.name)
         resume_text = " ".join([page.extract_text() for page in reader.pages])
         target_jd = db.get_jd_by_title(role_title)
-        ai_questions = matcher.generate_questions_from_resume(resume_text, target_jd)
         
-        q_html = f"""<div class='agent-box'><h3 style='color:#10b981; margin:0 0 10px 0;'>📋 Interview Assessment</h3>
-        <p style='color:#94a3b8; font-size:12px; margin-bottom:15px;'>Please answer the following questions clearly:</p>
+        # Adaptive Phase 8: Generate questions based on JD
+        ai_questions = matcher.generate_questions_from_jd(target_jd)
+        
+        q_html = f"""<div class='agent-box'><h3 style='color:#10b981; margin:0 0 10px 0;'>📋 AI Interview Assessment</h3>
         <p style='color:white; white-space: pre-wrap; font-size:16px; line-height:1.6;'>{ai_questions}</p></div>"""
+        
         return gr.update(visible=False), gr.update(visible=True), "✅ Interview Ready", q_html, resume_text
     except Exception as e: return gr.update(visible=True), gr.update(visible=False), f"❌ {e}", "", ""
 
 def background_analysis_task(name, role, email, phone, res_path, vid_path, res_text, q_html):
+    """Heavy background processing to avoid UI lag."""
     try:
-        raw_q = q_html.replace("<div class='agent-box'>", "").replace("</div>", "").replace("<h3 style='color:#10b981; margin:0 0 10px 0;'>📋 Interview Assessment</h3>", "").replace("<p style='color:#94a3b8; font-size:12px; margin-bottom:15px;'>Please answer the following questions clearly:</p>", "").replace("<p style='color:white; white-space: pre-wrap; font-size:16px; line-height:1.6;'>", "").replace("</p>", "")
+        raw_q = q_html.replace("<div class='agent-box'>", "").replace("</div>", "").replace("AI Interview Assessment", "")
         target_jd = db.get_jd_by_title(role)
+        
         ats_data = matcher.analyze_resume_llm(res_text, target_jd)
         behavior = extract_features(res_path, target_jd, vid_path, skip_ats=True, questions=raw_q)
+        
         res_url = upload_to_cloud(res_path, "image")
         vid_url = upload_to_cloud(vid_path, "video")
         
@@ -102,84 +108,92 @@ def background_analysis_task(name, role, email, phone, res_path, vid_path, res_t
         print(f"✅ [CLOUD SYNC] Complete for {name}")
     except Exception as e: print(f"❌ Background Error: {e}")
 
-def final_candidate_submit(name, role, email, phone, resume, video, res_text, q_html):
+def final_candidate_submit(name, role, email, phone, resume, video, resume_text, questions_html):
     if not video: return "⚠️ Record Video", gr.update(visible=True), name, email, phone, resume, video
-    threading.Thread(target=background_analysis_task, args=(name, role, email, phone, resume.name, video, res_text, q_html)).start()
-    return "✅ **Registration Successful!** AI processing in background.", gr.update(visible=True), "", "", "", None, None
+    
+    # Start thread for zero-lag
+    threading.Thread(target=background_analysis_task, args=(name, role, email, phone, resume.name, video, resume_text, questions_html)).start()
+    
+    return "✅ **Registration Successful!** You can now close this tab.", gr.update(visible=True), "", "", "", None, None
 
 def show_processing_warning(video_data):
     if video_data is not None:
         return gr.update(value='<div class="wait-warning">⚠️ Finalizing Recording... Please wait for the Play icon before clicking Submit.</div>', visible=True)
     return gr.update(visible=False)
 
-# --- HR LOGIC: DATA FETCHING ---
+# --- HR LOGIC ---
 def load_full_candidate_info(name):
-    print(f"📡 HR Fetching: {name}")
     data = db.get_candidate_details(name)
-    if not data: return [None]*7 + ["N/A", "### ❌ Record not yet found."]
+    if not data: return ["No Data"]*6 + [f"## ❌ Record not yet found for {name}"]
     
     details = data.get('details') or {}
     if isinstance(details, str): details = json.loads(details)
     
-    xai = f"<div style='background:#1e293b; padding:10px; border-radius:8px;'><b>🧠 AI REASONING</b><br>Strengths: {details.get('strengths', 'N/A')}<br>Gaps: {details.get('weaknesses', 'N/A')}</div>"
-    raw_status = str(data.get('integrity_status', 'Safe')).upper()
-    color = "#ef4444" if raw_status == "HIGH" else "#22c55e"
-    integ = f"<div style='border:2px solid {color}; padding:10px;'>🛡️ <b>INTEGRITY: {raw_status}</b></div>"
-    stats = f"**Contact:** {data.get('email', 'N/A')} | {data.get('phone', 'N/A')}\n- **Grade:** {data.get('behavior_grade', 'N/A')}\n- **Overall Fit:** {data.get('final_score', 0)}%"
+    xai = f"<div style='background:#1e293b; border-left: 5px solid #38bdf8; padding:15px; border-radius:10px;'><b>🧠 AI REASONING (XAI)</b><br>Strengths: {details.get('strengths', 'N/A')}<br>Gaps: {details.get('weaknesses', 'N/A')}</div>"
     
-    return (data.get('video_url'), f"### 📄 [View Resume]({data.get('resume_url', '#')})", data.get('transcript', ''), f"{data.get('ats_score', 0)}%", stats, integ, xai, f"## 👤 Reviewing: {name}")
+    status = str(data.get('integrity_status', 'Safe')).upper()
+    color = "#ef4444" if status == "HIGH" else "#22c55e"
+    integ = f"<div style='background:#111827; border: 2px solid {color}; padding:15px; border-radius:10px;'>🛡️ <b>BEHAVIORAL INTEGRITY: {status}</b><br>{data.get('conflict_report', 'Cues aligned.')}</div>"
+    
+    final_score = int(data.get('final_score', 0))
+    s_color = "#22c55e" if final_score > 75 else "#f59e0b"
+    suit_html = f"<div style='background:#1e293b; padding:25px; border-radius:15px; border: 3px solid {s_color}; text-align:center;'><h3>SUITABILITY INDEX</h3><h1>{final_score}/100</h1></div>"
+    
+    contact = f"**Email:** {data.get('email', 'N/A')} | **Phone:** {data.get('phone', 'N/A')}\n\n[📄 Open Resume PDF]({data.get('resume_url', '#')})\n[📹 Watch Interview Video]({data.get('video_url', '#')})"
+    
+    return (data.get('transcript', ''), integ, gr.HTML(f"<b>Match: {data.get('ats_score', 0)}%</b>"), gr.HTML(f"<b>Grade: {data.get('behavior_grade', 'B')}</b>"), suit_html, contact, f"## 👤 Full Report: {name}")
 
 def handle_applicant_selection(evt: gr.SelectData, df):
-    if evt.index[1] != 4: return [gr.update()]*11
+    if evt.index[1] != 4: return [gr.update()]*10
     name = df.iloc[evt.index[0], 0]
-    return [None, "### ⏳ Loading...", "⏳ Fetching...", "...", "...", "...", "...", f"## 👤 Accessing: {name}", gr.update(visible=True), gr.Tabs(selected=4), name]
+    # Return loading indicators immediately
+    return ["⏳ Loading..."]*6 + [f"## 👤 Accessing: {name}", gr.update(visible=True), gr.Tabs(selected=4), name]
 
 # --- GUI LAYOUT ---
-with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="HireSync AI Pro") as demo:
+with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="HireSync AI Suite") as demo:
     res_txt_state = gr.State(""); hr_real_name_state = gr.State("")
 
     with gr.Tabs() as main_tabs:
-        # --- CANDIDATE ---
+        # --- CANDIDATE PORTAL ---
         with gr.TabItem("👤 CANDIDATE PORTAL"):
             with gr.Column(visible=True, elem_classes="candidate-box") as step_1_ui:
-                gr.Markdown("<p class='step-header'>Step 1: Login</p>")
-                c_name = gr.Textbox(label="Full Name"); c_role = gr.Dropdown(label="Position", choices=db.get_job_titles())
+                gr.Markdown("<p class='step-header'>Step 1: Welcome & Login</p>")
+                c_name = gr.Textbox(label="Full Name"); c_role = gr.Dropdown(label="Apply for Position", choices=db.get_job_titles())
                 login_btn = gr.Button("Next ➡️", variant="primary"); c_status = gr.Markdown("Ready")
             with gr.Column(visible=False, elem_classes="candidate-box") as step_2_ui:
-                gr.Markdown("<p class='step-header'>Step 2: Upload Details</p>")
-                c_email = gr.Textbox(label="Email"); c_phone = gr.Textbox(label="Phone"); c_res = gr.File(label="Resume (PDF)")
-                upload_btn = gr.Button("Next ➡️", variant="primary")
+                gr.Markdown("<p class='step-header'>Step 2: Upload Profile</p>")
+                c_email = gr.Textbox(label="Email Address"); c_phone = gr.Textbox(label="Phone Number"); c_res = gr.File(label="Resume (PDF)")
+                upload_btn = gr.Button("Generate AI Interview ➡️", variant="primary")
             with gr.Column(visible=False, elem_classes="candidate-box") as step_3_ui:
                 gr.Markdown("<p class='step-header'>Step 3: AI Interview</p>")
-                c_q_area = gr.HTML(); c_vid = gr.Video(label="Record Response", sources=["webcam", "upload"], interactive=True)
+                c_q_area = gr.HTML(); c_vid = gr.Video(label="Record Your Response", sources=["webcam", "upload"],mirror_webcam=False,interactive=True)
                 c_wait_msg = gr.HTML(visible=False); submit_btn = gr.Button("🚀 FINISH & SUBMIT", variant="primary")
 
-        # --- HR ADMIN ---
+        # --- HR ADMIN PORTAL ---
         with gr.TabItem("🏢 HR ADMIN PORTAL"):
             with gr.Tabs() as hr_tabs:
                 with gr.TabItem("➕ Publish Job", id=1):
-                    with gr.Column(elem_classes="hr-box"):
-                        h_title = gr.Textbox(label="Job Title"); h_jd = gr.Textbox(label="JD", lines=4); h_q = gr.Textbox(label="Questions", lines=2)
-                        h_btn = gr.Button("Publish Position", variant="primary"); h_status = gr.Markdown("")
-                with gr.TabItem("📋 Manage Vacancies", id=2):
-                    with gr.Column(elem_classes="hr-box"):
-                        hr_job_refresh = gr.Button("🔄 REFRESH"); hr_job_table = gr.Dataframe(); hr_delete_select = gr.Dropdown(label="Delete", choices=db.get_job_titles()); hr_delete_btn = gr.Button("DELETE", variant="stop"); hr_delete_status = gr.Markdown("")
+                    h_title = gr.Textbox(label="Job Title"); h_jd = gr.Textbox(label="Job Description", lines=4); h_q = gr.Textbox(label="Optional Q")
+                    h_btn = gr.Button("Publish Position", variant="primary"); h_status = gr.Markdown("")
+                with gr.TabItem("📋 Vacancies", id=2):
+                    hr_j_refresh = gr.Button("🔄 REFRESH"); hr_j_table = gr.Dataframe(); hr_j_del = gr.Dropdown(label="Delete", choices=db.get_job_titles()); hr_j_del_btn = gr.Button("DELETE", variant="stop"); hr_j_del_status = gr.Markdown("")
                 with gr.TabItem("📊 Applicant List", id=3):
-                    with gr.Row():
-                        hr_view_selector = gr.Dropdown(label="Filter Role", choices=db.get_job_titles()); hr_refresh_list = gr.Button("🔄 LOAD")
+                    hr_view_selector = gr.Dropdown(label="Filter Role", choices=db.get_job_titles()); hr_refresh_list = gr.Button("🔄 LOAD")
                     hr_main_table = gr.Dataframe(headers=["Name", "Role", "Score", "Date", "Analysis"], interactive=False)
                 with gr.TabItem("🔍 Deep Review", id=4, visible=False) as deep_review_tab:
-                    hr_back_btn = gr.Button("⬅️ BACK")
+                    hr_back_btn = gr.Button("⬅️ BACK TO LIST")
                     with gr.Row():
                         with gr.Column(scale=1):
-                            hr_name_display = gr.Markdown(); hr_ats_label = gr.Label(label="ATS Score"); hr_integrity_box = gr.HTML(); hr_xai_box = gr.HTML(); hr_extra_stats = gr.Markdown(); hr_pdf_display = gr.Markdown(); hr_reload_btn = gr.Button("🔄 RE-LOAD DATA")
-                        with gr.Column(scale=2):
-                            hr_video_display = gr.Video(label="Cloud Playback"); hr_transcript_display = gr.Textbox(label="Transcription", lines=10)
+                            hr_name_display = gr.Markdown(); hr_integrity_box = gr.HTML(); hr_ats_display = gr.HTML()
+                            hr_interview_display = gr.HTML(); hr_suitability_display = gr.HTML(); hr_contact_info = gr.Markdown()
+                            hr_reload_btn = gr.Button("🔄 RE-LOAD DATA") 
+                        with gr.Column(scale=1):
+                            hr_xai_box = gr.HTML(); hr_transcript_display = gr.Textbox(label="Full Transcription", lines=12)
 
-    # --- ACTION MAPPINGS ---
-    h_btn.click(hr_create_job, [h_title, h_jd, h_q], [h_status, c_role, hr_view_selector, hr_delete_select])
-    hr_job_refresh.click(db.get_all_positions_df, outputs=[hr_job_table])
-    hr_delete_btn.click(hr_delete_job, [hr_delete_select], [hr_delete_status, c_role, hr_delete_select, hr_view_selector])
+    # --- ACTIONS ---
+    h_btn.click(hr_create_job, [h_title, h_jd, h_q], [h_status, c_role, hr_view_selector, hr_j_del])
+    hr_j_refresh.click(db.get_all_positions_df, outputs=[hr_j_table])
+    hr_j_del_btn.click(hr_delete_job, [hr_j_del], [hr_j_del_status, c_role, hr_j_del, hr_view_selector])
     
     login_btn.click(go_to_step_2, [c_name, c_role], [step_1_ui, step_2_ui, c_status])
     upload_btn.click(go_to_step_3, [c_res, c_role], [step_2_ui, step_3_ui, c_status, c_q_area, res_txt_state])
@@ -187,20 +201,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="HireSync AI Pro") 
     submit_btn.click(final_candidate_submit, [c_name, c_role, c_email, c_phone, c_res, c_vid, res_txt_state, c_q_area], [c_status, step_1_ui, c_name, c_email, c_phone, c_res, c_vid]).then(lambda: [gr.update(visible=False), gr.update(visible=False)], None, [step_3_ui, c_wait_msg])
 
     hr_refresh_list.click(lambda r: db.get_candidates_by_role(r), [hr_view_selector], [hr_main_table])
-    
-    # Selecting triggers Jump + Loading Screen, THEN fetches real data (Total 11 arguments fixed)
-    hr_main_table.select(
-        handle_applicant_selection, 
-        [hr_main_table], 
-        [hr_video_display, hr_pdf_display, hr_transcript_display, hr_ats_label, hr_extra_stats, hr_integrity_box, hr_xai_box, hr_name_display, deep_review_tab, hr_tabs, hr_real_name_state]
-    ).then(
-        load_full_candidate_info, 
-        [hr_real_name_state], 
-        [hr_video_display, hr_pdf_display, hr_transcript_display, hr_ats_label, hr_extra_stats, hr_integrity_box, hr_xai_box, hr_name_display]
-    )
-    
-    hr_reload_btn.click(load_full_candidate_info, [hr_real_name_state], [hr_video_display, hr_pdf_display, hr_transcript_display, hr_ats_label, hr_extra_stats, hr_integrity_box, hr_xai_box, hr_name_display])
+    hr_main_table.select(handle_applicant_selection, [hr_main_table], [hr_transcript_display, hr_integrity_box, hr_ats_display, hr_interview_display, hr_suitability_display, hr_contact_info, hr_name_display, deep_review_tab, hr_tabs, hr_real_name_state]).then(load_full_candidate_info, [hr_real_name_state], [hr_transcript_display, hr_integrity_box, hr_ats_display, hr_interview_display, hr_suitability_display, hr_contact_info, hr_name_display])
+    hr_reload_btn.click(load_full_candidate_info, [hr_real_name_state], [hr_transcript_display, hr_integrity_box, hr_ats_display, hr_interview_display, hr_suitability_display, hr_contact_info, hr_name_display])
     hr_back_btn.click(lambda: [gr.update(visible=False), gr.Tabs(selected=3)], outputs=[deep_review_tab, hr_tabs])
 
 if __name__ == "__main__":
-    demo.queue().launch(inbrowser=True, share=True, inline=False)
+    demo.queue().launch(inbrowser=True, share=False, inline=False)
