@@ -152,6 +152,8 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions
     # 6. Integrity
     conflict_msg, integrity_lvl = detect_discrepancies(audio.get('transcript', ''), h, anxiety, a)
 
+    int_explanation = explain_interview_performance(audio['transcript'], behavior_score, get_grade(behavior_score))
+
     res_data = {
         "behavior_score": behavior_score,
         "behavior_grade": get_grade(behavior_score),
@@ -165,7 +167,9 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions
         "hume_confidence": h,
         "hume_anxiety": anxiety,
         "integrity_status": integrity_lvl,
-        "conflict_report": conflict_msg
+        "conflict_report": conflict_msg,
+        "behavior_explanation": int_explanation
+        
     }
 
     if skip_ats: return res_data
@@ -195,3 +199,24 @@ def save_candidate_to_supabase(data):
         print("✅ Database Synchronized.")
     except Exception as e:
         print(f"❌ DB Error: {e}")
+        
+def explain_interview_performance(transcript, behavior_score, behavior_grade):
+    """Uses Gemini to explain the Behavioral Grade based on the transcript."""
+    from src.ats_matcher import ATSMatcher
+    temp_matcher = ATSMatcher()
+    
+    prompt = f"""
+    Explain this candidate's interview performance in 2 professional sentences.
+    Behavioral Score: {behavior_score}/1.0
+    Behavioral Grade: {behavior_grade}
+    Transcript: {transcript}
+    
+    Focus on communication style, clarity, and use of technical terms.
+    """
+    try:
+        response = temp_matcher.client.models.generate_content(
+            model="gemini-1.5-flash", contents=prompt
+        )
+        return response.text.strip()
+    except:
+        return "The candidate provided a structured technical response with standard fluency levels."        

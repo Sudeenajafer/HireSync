@@ -27,57 +27,82 @@ def audio_phase_score(video_path):
         if not os.path.exists(video_path):
             return {"transcript": "[Error: File not found on server]", "duration": "00:00", "fluency_score": 0}
 
-        print(f"🎤 Extracting audio from uploaded file: {os.path.basename(video_path)}")
+        print(f"🎤 Extracting audio from: {os.path.basename(video_path)}")
         
         # 2. UNIVERSAL EXTRACTION COMMAND
-        # We removed -map 0:a? and used a simpler approach that works for 99% of MP4/WebM files
         cmd = [
             'ffmpeg', '-y', 
             '-i', video_path,
-            '-vn',                    # Disable video
-            '-ac', '1',               # Force Mono
-            '-ar', '16000',           # 16kHz
-            '-acodec', 'pcm_s16le',   # Standard WAV codec
+            '-vn',                    
+            '-ac', '1',               
+            '-ar', '16000',           
+            '-acodec', 'pcm_s16le',   
             temp_wav
         ]
         
-        # Run FFmpeg and capture logs for debugging
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        subprocess.run(cmd, capture_output=True, text=True)
 
         # 3. CONTENT VALIDATION
         if not os.path.exists(temp_wav) or os.path.getsize(temp_wav) < 1000:
-            print(f"❌ FFmpeg Log: {result.stderr}")
             return {
-                "transcript": "[AUDIO NOT FOUND: The uploaded video has no sound track, or the format is incompatible. Please try an MP4 with AAC/MP3 audio.]",
+                "transcript": "[AUDIO NOT FOUND: Ensure your microphone is active.]",
                 "duration": "00:00", "wpm": 0, "fluency_score": 0.1, "communication_score": 0.1
             }
 
-        # 4. TRANSCRIPTION (Gemini 1.5)
+        # 4. TRANSCRIPTION WITH 404 & 503 PROTECTION
         print("☁️ Sending to Gemini for Cloud Transcription...")
         with open(temp_wav, "rb") as f:
             audio_data = f.read()
             
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=[
-                "Provide a verbatim transcript of this technical interview response.",
-                types.Part.from_bytes(data=audio_data, mime_type="audio/wav")
-            ]
-        )
-        full_text = response.text.strip()
+        full_text = ""
+        # The list of models to try in case one 404s
+        model_options = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
         
+        for attempt in range(3):
+            try:
+                # Use the first model in the list
+                current_model = model_options[0] if attempt < 2 else model_options[1]
+                
+                response = client.models.generate_content(
+                    model=current_model,
+                    contents=[
+                        types.Part.from_bytes(data=audio_data, mime_type="audio/wav"),
+                        "Provide a verbatim transcript of this audio. Technical accuracy is required."
+                    ]
+                )
+                full_text = response.text.strip()
+                if full_text:
+                    break 
+            except Exception as e:
+                err_str = str(e).lower()
+                if "503" in err_str or "overloaded" in err_str:
+                    print(f"⚠️ Gemini Busy (Attempt {attempt+1}/3). Retrying...")
+                    time.sleep(4)
+                elif "404" in err_str or "not found" in err_str:
+                    print(f"🔄 Model string 404. Trying alternative alias...")
+                    # Switch to the 'latest' alias if the standard name 404s
+                    model_options.reverse() 
+                else:
+                    print(f"❌ Gemini Error: {e}")
+                    full_text = "[Transcription Error]"
+                    break
+
+        # If after 3 attempts we still have no text
+        if not full_text:
+            full_text = "[Transcription Service Temporarily Unavailable]"
+            
         # 5. LINGUISTIC ANALYSIS
         y, sr = librosa.load(temp_wav)
         total_dur = librosa.get_duration(y=y, sr=sr)
         
         words = full_text.split()
-        # WPM Calculation: (Total Words / Duration in Minutes)
+        # WPM Calculation
         wpm = round(len(words) / (total_dur / 60), 1) if total_dur > 0 else 0
 
-        print(f"✅ Success: {len(words)} words transcribed.")
+        print(f"✅ Transcription Complete: {len(words)} words detected.")
 
         return {
-            "transcript": full_text if full_text else "[Silence detected in file]",
+            "transcript": full_text if full_text else "[Silence detected]",
             "duration": f"{int(total_dur // 60):02d}:{int(total_dur % 60):02d}",
             "wpm": wpm,
             "fluency_score": 0.85 if 120 < wpm < 170 else 0.60,
@@ -89,7 +114,7 @@ def audio_phase_score(video_path):
         return {"transcript": f"Error: {str(e)}", "duration": "00:00", "fluency_score": 0.1, "wpm": 0}
 
     finally:
-        # Always clean up the temp WAV file
+        # Cleanup
         if os.path.exists(temp_wav):
             try: os.remove(temp_wav)
             except: pass
