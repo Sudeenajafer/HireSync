@@ -102,10 +102,47 @@ def background_processing_task(name, role, email, phone, res_path, vid_path, res
 
 def final_candidate_submit(name, role, email, phone, resume, video, resume_text, questions_html):
     if not video: return "⚠️ Record Video", gr.update(visible=True), name, email, phone, resume, video
-    # Kick off background thread
-    threading.Thread(target=background_processing_task, args=(name, role, email, phone, resume.name, video, resume_text, questions_html)).start()
-    # Return immediately to Step 1
-    return "✅ **Registration Successful!** You may close this tab.", gr.update(visible=True), "", "", "", None, None
+    
+    try:
+        # 1. Standard Analysis call
+        raw_q = questions_html.replace("<div class='agent-box'>", "").replace("</div>", "")
+        target_jd = db.get_jd_by_title(role)
+        
+        ats_data = matcher.analyze_resume_llm(resume_text, target_jd)
+        behavior = extract_features(resume.name, target_jd, video, skip_ats=True, questions=raw_q)
+        
+        ats_val = ats_data.get('final_score', 0)
+        beh_val = behavior.get('behavior_score', 0) * 100
+        final_val = round((ats_val * 0.6) + (beh_val * 0.4), 2)
+
+        # 2. SAVE TO SUPABASE (Added 'attention' and 'relevance' keys)
+        record = {
+            "name": name, "role": role, "email": email, "phone": phone,
+            "ats_score": ats_val, 
+            "behavior_score": beh_val, 
+            "final_score": final_val,
+            "transcript": behavior.get('transcript', ''),
+            "resume_url": upload_to_cloud(resume.name, "image"),
+            "video_url": upload_to_cloud(video, "video"),
+            "behavior_grade": behavior.get('behavior_grade', 'B'),
+            "hume_confidence": behavior.get('hume_confidence', 0), # Confirmed Key
+            "hume_anxiety": behavior.get('hume_anxiety', 0),
+            "attention": behavior.get('attention', 0),             # FIXED: Was missing
+            "relevance_score": behavior.get('relevance_score', 0), # FIXED: Was missing
+            "integrity_status": behavior.get('integrity_status', 'Safe'),
+            "conflict_report": behavior.get('conflict_report', 'Clean'),
+            "details": ats_data.get('explanation', {}),
+            "final_reasoning_text": behavior.get('final_reasoning_text', 'Analysis complete.')
+        }
+        
+        # Start background thread to save
+        threading.Thread(target=save_candidate_to_supabase, args=(record,)).start()
+
+        return "✅ **Application Successful!**", gr.update(visible=True), "", "", "", None, None
+
+    except Exception as e:
+        print(f"Submission Error: {e}")
+        return f"❌ Error: {str(e)}", gr.update(visible=True)
 
 def show_processing_warning(video_data):
     if video_data is not None:
@@ -127,6 +164,23 @@ def load_full_candidate_info(name):
             details = json.loads(details)
         except:
             details = {}
+    conf = data.get('hume_confidence')
+    conf_val = round(float(conf), 2) if conf is not None else 0.0
+    
+    attn = data.get('attention')
+    attn_val = round(float(attn), 2) if attn is not None else 0.0
+
+    # 1. INTERVIEW PERFORMANCE (Updated with real variables)
+    beh_score = data.get('behavior_score', 0)
+    int_html = f"""
+    <div style="background:#0f172a; border-left: 5px solid #a855f7; padding:15px; border-radius:10px; margin-bottom:15px;">
+        <h3 style="color:#a855f7; margin:0; font-size:16px;">🎤 PERFORMANCE ANALYSIS</h3>
+        <p style="color:white; font-size:13px; line-height:1.4;">
+            Candidate achieved a behavioral index of <b>{beh_score}%</b>. 
+            This reflects eye-contact consistency, speech fluency, and answer relevance.
+        </p>
+        <p style="color:#94a3b8; font-size:11px;">Confidence: {conf_val} | Focus: {attn_val}</p>
+    </div>"""
 
     # --- 2. EXPLAINABLE INTEGRITY AUDIT (Phase 5) ---
     raw_status = str(data.get('integrity_status', 'Safe')).upper()
@@ -172,7 +226,13 @@ def load_full_candidate_info(name):
     # --- 5. TOTAL SUITABILITY VERDICT (Phase 8) ---
     final_score = int(data.get('final_score', 0))
     s_color = "#22c55e" if final_score > 75 else "#f59e0b" if final_score > 50 else "#ef4444"
-    
+    # Use the 'final_reasoning_text' we saved in the database
+    # Fallback to a logic-based verdict if the column is missing
+    verdict_text = data.get('final_reasoning_text')
+    if not verdict_text:
+        verdict_text = "Analysis based on technical match and behavioral performance."
+
+
     suitability_html = f"""
     <div style="background:#1e293b; padding:25px; border-radius:15px; border: 3px solid {s_color}; text-align:center;">
         <h3 style="color:#94a3b8; margin:0; font-size:12px;">OVERALL SUITABILITY INDEX</h3>
@@ -193,12 +253,12 @@ def load_full_candidate_info(name):
     [📄 Open Resume PDF]({data.get('resume_url', '#')})  
     [📹 Watch Interview Video]({data.get('video_url', '#')})
     """
-    
+
     return (
         data.get('transcript', 'No speech detected.'), 
         integrity_html, 
         ats_html, 
-        interview_html, 
+        int_html,
         suitability_html, 
         contact, 
         f"## 👤 Full AI Report: {name}"

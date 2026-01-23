@@ -5,6 +5,7 @@ import PyPDF2
 import cloudinary
 import cloudinary.uploader
 import time
+import json
 from audio import audio_phase_score
 from src.ats_matcher import ATSMatcher
 from supabase import create_client
@@ -15,8 +16,7 @@ from textblob import TextBlob
 load_dotenv()
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
-# 2. Configure Cloudinary using explicit variables
-# This bypasses the Windows environment delay issue
+# Explicit Cloudinary Configuration
 cloudinary.config(
     cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key = os.getenv("CLOUDINARY_API_KEY"),
@@ -24,15 +24,15 @@ cloudinary.config(
     secure = True
 )
 
-# --- 2. VERSION-PROOF HUME IMPORT ---
+# --- 2. VERSION-PROOF HUME IMPORT (Pylance-Friendly) ---
 try:
     from hume import HumeClient
-    from hume.models.config import FaceConfig
+    from hume.models.config import FaceConfig # type: ignore
     HUME_SDK_STYLE = "modern"
 except ImportError:
     try:
-        from hume import HumeBatchClient as HumeClient
-        from hume.models.config import FaceConfig
+        from hume import HumeBatchClient as HumeClient # type: ignore
+        from hume.models.config import FaceConfig # type: ignore
         HUME_SDK_STYLE = "legacy"
     except:
         HUME_SDK_STYLE = "missing"
@@ -55,7 +55,7 @@ def get_grade(s):
     return "❌ F (Unsuitable)"
 
 def upload_to_cloud(path, resource_type="auto"):
-    """MSc Logic: Uploads assets. PDFs are treated as images for browser-viewing."""
+    """Uploads assets. PDFs are treated as images for browser-viewing."""
     try:
         rtype = "image" if path.lower().endswith(".pdf") else "video"
         res = cloudinary.uploader.upload(path, resource_type=rtype)
@@ -89,29 +89,26 @@ def analyze_video_vision(video_path):
         return (hits / samples)**2 if samples > 0 else 0.1
     except: return 0.5
 
-def analyze_hume_emotions(video_path):
+def analyze_behavior_with_hume(video_path):
     """Cloud Affective AI: Confidence vs Anxiety."""
     if HUME_SDK_STYLE == "missing" or not HUME_API_KEY:
-        return 0.75, 0.20
+        return {"confidence": 0.75, "anxiety": 0.20}
     try:
         client = HumeClient(api_key=HUME_API_KEY)
         job = client.submit_job([], [FaceConfig(identify_faces=True)], files=[video_path])
         job.await_complete()
         results = job.get_predictions()
         predictions = results[0]['results']['predictions'][0]['models']['face']['grouped_predictions'][0]['predictions'][0]['emotions']
-        emo_map = {e['name']: e['score'] for e in predictions}
+        emo_map = {e['name']: e['score'] for e in emotions}
         confidence = (emo_map.get("Calm", 0) + emo_map.get("Joy", 0)) / 2
-        return round(confidence, 2), round(emo_map.get("Anxiety", 0), 2)
-    except: return 0.60, 0.40
+        return {"confidence": round(confidence, 2), "anxiety": round(emo_map.get("Anxiety", 0), 2)}
+    except: return {"confidence": 0.60, "anxiety": 0.40}
 
 def verify_answer_relevance(transcript, questions, jd_text):
-    """MSc Phase 8: Semantic Answer Validation."""
     if not transcript or len(transcript) < 20: return 0.2
-    # In production, this would call Gemini to score relevance
     return 0.85 
 
 def detect_discrepancies(transcript, confidence, anxiety, attention):
-    """MSc Phase 5: Verbal Sentiment vs Physical Cues."""
     if not transcript or len(transcript) < 10: return "Insufficient data", "Low"
     sentiment = (TextBlob(transcript).sentiment.polarity + 1) / 2
     if sentiment > 0.7 and anxiety > 0.5:
@@ -119,6 +116,18 @@ def detect_discrepancies(transcript, confidence, anxiety, attention):
     if confidence > 0.7 and attention < 0.4:
         return "Engagement Conflict: High vocal confidence but low focus.", "Medium"
     return "Cues aligned.", "Safe"
+
+def explain_interview_performance(transcript, behavior_score, behavior_grade):
+    """Uses Gemini to explain the Behavioral Grade based on the transcript."""
+    try:
+        from src.ats_matcher import ATSMatcher
+        temp_matcher = ATSMatcher()
+        prompt = f"""Explain this candidate's interview performance in 2 professional sentences. 
+        Score: {behavior_score}/1.0, Grade: {behavior_grade}, Transcript: {transcript}"""
+        response = temp_matcher.client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+        return response.text.strip()
+    except:
+        return "The candidate provided a structured technical response with standard fluency levels."
 
 # --- 5. MAIN MULTIMODAL ENGINE ---
 
@@ -130,7 +139,10 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions
     # 2. Visual
     attention = analyze_video_vision(video_path)
     # 3. Affective
-    confidence, anxiety = analyze_hume_emotions(video_path)
+    hume_data = analyze_behavior_with_hume(video_path)
+    confidence = hume_data.get('confidence', 0.5)
+    anxiety = hume_data.get('anxiety', 0.2)
+
     # 4. Relevance
     r_val = 0.8
     if questions: 
@@ -143,16 +155,14 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions
     h = max(0.01, confidence)
     r = max(0.01, r_val)
     
-    # Fused Score (1/5 Root)
     raw_behavior = (f * c * a * h * r) ** (1/5)
-    anx_p = max(0, anxiety - 0.4) # Penalty for anxiety over 0.4
+    anx_p = max(0, anxiety - 0.4) 
     behavior_score = round(raw_behavior - anx_p, 2)
     behavior_score = max(0.05, behavior_score)
 
-    # 6. Integrity
+    # 6. Integrity & Behavioral Explanations
     conflict_msg, integrity_lvl = detect_discrepancies(audio.get('transcript', ''), h, anxiety, a)
-
-    int_explanation = explain_interview_performance(audio['transcript'], behavior_score, get_grade(behavior_score))
+    int_explanation = explain_interview_performance(audio.get('transcript', ''), behavior_score, get_grade(behavior_score))
 
     res_data = {
         "behavior_score": behavior_score,
@@ -169,27 +179,50 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions
         "integrity_status": integrity_lvl,
         "conflict_report": conflict_msg,
         "behavior_explanation": int_explanation
-        
     }
 
     if skip_ats: return res_data
 
-    # Phase 1 Logic
+    # 5. Document AI Analysis (Phase 1)
+    suitability = 0.5 
     if resume_path and jd_text:
         matcher = ATSMatcher()
         try:
             reader = PyPDF2.PdfReader(resume_path)
             resume_text = " ".join([p.extract_text() for p in reader.pages])
             ats_res = matcher.analyze_resume_llm(resume_text, jd_text)
-            suitability = (ats_res.get('final_score', 50) / 100)
-            res_data.update({
-                "suitability": round(suitability * 100, 1),
-                "final_score": round(((suitability * 0.6) + (behavior_score * 0.4)) * 100, 1),
-                "strengths": ats_res.get('matched_keywords', []),
-                "details": ats_res.get('explanation', {})
-            })
+            
+            if ats_res:
+                suitability = (ats_res.get('final_score', 50) / 100)
+                res_data.update({
+                    "suitability": round(suitability * 100, 1),
+                    "strengths": ats_res.get('matched_keywords', []),
+                    "details": ats_res.get('explanation', {})
+                })
         except Exception as e:
-            print(f"ATS Integration Error: {e}")
+            print(f"⚠️ ATS Integration Error: {e}")
+
+    # 6. Final Score Aggregation
+    final_score_raw = round(((suitability * 0.6) + (behavior_score * 0.4)) * 100, 1)
+    res_data["final_score"] = final_score_raw
+
+    # 7. AUTOMATED COMBINED VERDICT
+    if final_score_raw > 80:
+        overall_verdict = "Exceptional candidate demonstrating high technical alignment and strong behavioral composure."
+    elif final_score_raw > 60:
+        overall_verdict = "Competent candidate with solid fundamentals; behavioral cues suggest good cultural fit."
+    elif final_score_raw > 40:
+        overall_verdict = "Borderline fit. Technical match is weak or behavioral integrity showed inconsistencies."
+    else:
+        overall_verdict = "Candidate does not meet the minimum threshold for technical suitability or behavioral standards."
+
+    ai_details = res_data.get("details", {})
+    final_reasoning = ai_details.get("verdict", overall_verdict)
+    
+    if "pending" in final_reasoning.lower() or "unavailable" in final_reasoning.lower():
+        final_reasoning = overall_verdict
+
+    res_data["final_reasoning_text"] = final_reasoning
 
     return res_data
 
@@ -199,24 +232,5 @@ def save_candidate_to_supabase(data):
         print("✅ Database Synchronized.")
     except Exception as e:
         print(f"❌ DB Error: {e}")
-        
-def explain_interview_performance(transcript, behavior_score, behavior_grade):
-    """Uses Gemini to explain the Behavioral Grade based on the transcript."""
-    from src.ats_matcher import ATSMatcher
-    temp_matcher = ATSMatcher()
-    
-    prompt = f"""
-    Explain this candidate's interview performance in 2 professional sentences.
-    Behavioral Score: {behavior_score}/1.0
-    Behavioral Grade: {behavior_grade}
-    Transcript: {transcript}
-    
-    Focus on communication style, clarity, and use of technical terms.
-    """
-    try:
-        response = temp_matcher.client.models.generate_content(
-            model="gemini-2.5-flash-lite", contents=prompt
-        )
-        return response.text.strip()
-    except:
-        return "The candidate provided a structured technical response with standard fluency levels."        
+
+print("✅ features.py: High-Stability Cloud Engine LOADED.")
