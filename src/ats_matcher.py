@@ -37,7 +37,7 @@ class ATSMatcher:
 
     def analyze_resume_llm(self, resume_text, jd_text):
         print("🚀 [API] Calling Gemini for Deep ATS...")
-        model_name = "gemini-1.5-flash"
+        model_name = "gemini-2.5-flash-lite"
         
         prompt = f"""Act as a Senior Recruiter. Compare Resume vs JD. 
         Return JSON: {{ "final_score": int, "explanation": {{ "strengths": "str", "weaknesses": "str", "verdict": "str" }}, "matched_keywords": [] }}
@@ -66,6 +66,38 @@ class ATSMatcher:
         """MSc Phase 8: Standardized Technical Interview Generation."""
         prompt = f"Act as an Interviewer. Generate 3 technical questions for this JD: {jd_text[:1500]}. Question 1 must be an intro. Format as numbered list."
         try:
-            response = self.client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+            response = self.client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
             return response.text.strip()
         except: return "1. Please introduce yourself.\n2. What are your key technical strengths?\n3. Why do you want this role?"
+        
+        
+    def generate_final_verdict_xai(self, name, ats_score, behavior_score, behavior_grade, strengths, gaps, integrity, transcript):
+        """
+        MSc XAI Logic: Fuses document and behavioral data into a narrative verdict.
+        """
+        prompt = f"""
+        Act as a Senior Recruitment Consultant. Write a 3-sentence 'Final Hiring Verdict' for {name}.
+        
+        DATA:
+        - Technical Match (Resume vs JD): {ats_score}%
+        - Behavioral Score (Interview): {behavior_score}% (Grade: {behavior_grade})
+        - Integrity Status: {integrity}
+        - Top Strengths found: {strengths}
+        - Technical Gaps: {gaps}
+        - Interview Transcript Summary: {transcript[:300]}...
+
+        TASK:
+        Explain exactly why the candidate got their suitability score. 
+        If the score is low (like 44/100), be professional but honest about the gaps.
+        Mention if their behavior (confidence/focus) matched their technical skills.
+        
+        OUTPUT: Return only the 3-sentence paragraph.
+        """
+        try:
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt
+            )
+            return response.text.strip()
+        except:
+            return f"Candidate {name} shows a {behavior_grade} level of interview performance with a {ats_score}% technical match. Further manual review of the detected technical gaps is recommended."    

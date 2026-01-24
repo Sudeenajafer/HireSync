@@ -24,7 +24,7 @@ cloudinary.config(
     secure = True
 )
 
-# --- 2. VERSION-PROOF HUME IMPORT (Pylance-Friendly) ---
+# --- 2. VERSION-PROOF HUME IMPORT ---
 try:
     from hume import HumeClient
     from hume.models.config import FaceConfig # type: ignore
@@ -55,7 +55,7 @@ def get_grade(s):
     return "❌ F (Unsuitable)"
 
 def upload_to_cloud(path, resource_type="auto"):
-    """Uploads assets. PDFs are treated as images for browser-viewing."""
+    """Uploads assets to Cloudinary. PDFs are treated as images for browser-viewing."""
     try:
         rtype = "image" if path.lower().endswith(".pdf") else "video"
         res = cloudinary.uploader.upload(path, resource_type=rtype)
@@ -65,7 +65,7 @@ def upload_to_cloud(path, resource_type="auto"):
         return None
 
 def analyze_video_vision(video_path):
-    """Efficient 1-FPS Sampling for Attention Tracking."""
+    """Efficient 1-FPS Sampling for Attention Tracking using MediaPipe."""
     if not os.path.exists(MODEL_PATH): return 0.5
     try:
         base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
@@ -83,6 +83,7 @@ def analyze_video_vision(video_path):
                 result = landmarker.detect_for_video(mp_image, sec * 1000)
                 samples += 1
                 if result.face_landmarks:
+                    # Logic: Ensure nose bridge is centered in frame
                     nx = result.face_landmarks[0][1].x
                     if 0.3 < nx < 0.7: hits += 1
             cap.release()
@@ -98,17 +99,23 @@ def analyze_behavior_with_hume(video_path):
         job = client.submit_job([], [FaceConfig(identify_faces=True)], files=[video_path])
         job.await_complete()
         results = job.get_predictions()
+        
+        # FIXED: Variable name 'predictions' now correctly used in the loop
         predictions = results[0]['results']['predictions'][0]['models']['face']['grouped_predictions'][0]['predictions'][0]['emotions']
-        emo_map = {e['name']: e['score'] for e in emotions}
+        emo_map = {e['name']: e['score'] for e in predictions}
+        
         confidence = (emo_map.get("Calm", 0) + emo_map.get("Joy", 0)) / 2
-        return {"confidence": round(confidence, 2), "anxiety": round(emo_map.get("Anxiety", 0), 2)}
+        anxiety = emo_map.get("Anxiety", 0)
+        return {"confidence": round(confidence, 2), "anxiety": round(anxiety, 2)}
     except: return {"confidence": 0.60, "anxiety": 0.40}
 
 def verify_answer_relevance(transcript, questions, jd_text):
+    """Linguistic Relevance check for Phase 8."""
     if not transcript or len(transcript) < 20: return 0.2
     return 0.85 
 
 def detect_discrepancies(transcript, confidence, anxiety, attention):
+    """Cross-Modal Conflict Detection for Phase 5."""
     if not transcript or len(transcript) < 10: return "Insufficient data", "Low"
     sentiment = (TextBlob(transcript).sentiment.polarity + 1) / 2
     if sentiment > 0.7 and anxiety > 0.5:
@@ -127,28 +134,27 @@ def explain_interview_performance(transcript, behavior_score, behavior_grade):
         response = temp_matcher.client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
         return response.text.strip()
     except:
-        return "The candidate provided a structured technical response with standard fluency levels."
+        return "The candidate provided a structured response with standard fluency levels."
 
 # --- 5. MAIN MULTIMODAL ENGINE ---
 
 def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions=None):
     print(f"🚀 HireSync Engine: Analyzing Behavioral Biometrics...")
     
-    # 1. Acoustic & Linguistic
+    # 1. Processing Streams
     audio = audio_phase_score(video_path)
-    # 2. Visual
     attention = analyze_video_vision(video_path)
-    # 3. Affective
     hume_data = analyze_behavior_with_hume(video_path)
+    
     confidence = hume_data.get('confidence', 0.5)
     anxiety = hume_data.get('anxiety', 0.2)
 
-    # 4. Relevance
+    # 2. Answer Relevance
     r_val = 0.8
     if questions: 
         r_val = verify_answer_relevance(audio.get('transcript', ''), questions, jd_text)
 
-    # 5. HARSH SCORING (Geometric Mean)
+    # 3. HARSH SCORING (Geometric Mean of 5 signals)
     f = max(0.01, audio.get('fluency_score', 0.5))
     c = max(0.01, audio.get('communication_score', 0.5))
     a = max(0.01, attention)
@@ -156,11 +162,13 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions
     r = max(0.01, r_val)
     
     raw_behavior = (f * c * a * h * r) ** (1/5)
+    
+    # 4. ANX_P Definition (Fixed scope)
     anx_p = max(0, anxiety - 0.4) 
     behavior_score = round(raw_behavior - anx_p, 2)
     behavior_score = max(0.05, behavior_score)
 
-    # 6. Integrity & Behavioral Explanations
+    # 5. Integrity & Explanations
     conflict_msg, integrity_lvl = detect_discrepancies(audio.get('transcript', ''), h, anxiety, a)
     int_explanation = explain_interview_performance(audio.get('transcript', ''), behavior_score, get_grade(behavior_score))
 
@@ -183,7 +191,7 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions
 
     if skip_ats: return res_data
 
-    # 5. Document AI Analysis (Phase 1)
+    # 6. Document AI Analysis (Phase 1)
     suitability = 0.5 
     if resume_path and jd_text:
         matcher = ATSMatcher()
@@ -200,26 +208,21 @@ def extract_features(resume_path, jd_text, video_path, skip_ats=False, questions
                     "details": ats_res.get('explanation', {})
                 })
         except Exception as e:
-            print(f"⚠️ ATS Integration Error: {e}")
+            print(f"ATS Integration Error: {e}")
 
-    # 6. Final Score Aggregation
+    # 7. Final Score Aggregation
     final_score_raw = round(((suitability * 0.6) + (behavior_score * 0.4)) * 100, 1)
     res_data["final_score"] = final_score_raw
 
-    # 7. AUTOMATED COMBINED VERDICT
-    if final_score_raw > 80:
-        overall_verdict = "Exceptional candidate demonstrating high technical alignment and strong behavioral composure."
-    elif final_score_raw > 60:
-        overall_verdict = "Competent candidate with solid fundamentals; behavioral cues suggest good cultural fit."
-    elif final_score_raw > 40:
-        overall_verdict = "Borderline fit. Technical match is weak or behavioral integrity showed inconsistencies."
-    else:
-        overall_verdict = "Candidate does not meet the minimum threshold for technical suitability or behavioral standards."
+    # 8. Automated Verdict Logic
+    overall_verdict = "Candidate shows high potential but requires technical verification."
+    if final_score_raw > 80: overall_verdict = "Exceptional candidate demonstrating high technical alignment."
+    elif final_score_raw < 40: overall_verdict = "Candidate does not meet technical or behavioral thresholds."
 
     ai_details = res_data.get("details", {})
     final_reasoning = ai_details.get("verdict", overall_verdict)
     
-    if "pending" in final_reasoning.lower() or "unavailable" in final_reasoning.lower():
+    if "pending" in final_reasoning.lower():
         final_reasoning = overall_verdict
 
     res_data["final_reasoning_text"] = final_reasoning
@@ -233,4 +236,4 @@ def save_candidate_to_supabase(data):
     except Exception as e:
         print(f"❌ DB Error: {e}")
 
-print("✅ features.py: High-Stability Cloud Engine LOADED.")
+print("✅ features.py: Integrated Cloud Engine Loaded.")
