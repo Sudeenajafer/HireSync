@@ -36,62 +36,90 @@ class ATSMatcher:
         return True, ""
 
     def analyze_resume_llm(self, resume_text, jd_text):
-        print("🚀 [API] Calling Gemini for Deep ATS...")
-        model_name = "gemini-2.5-flash-lite"
+        """Generates high-detail XAI reasoning with strict category matching."""
+        print("🚀 [API] Calling Gemini for Strict ATS Match...")
+        prompt = f"""
+        Act as a Critical Technical Recruiter. Analyze the Resume against the Job Description.
         
-        prompt = f"""Act as a Senior Recruiter. Compare Resume vs JD. 
-        Return JSON: {{ "final_score": int, "explanation": {{ "strengths": "str", "weaknesses": "str", "verdict": "str" }}, "matched_keywords": [] }}
-        Resume: {resume_text[:4000]} | JD: {jd_text[:2000]}"""
+        STRICT RULES:
+        1. CATEGORY CHECK: If the Job is 'Business Analyst' and the Resume is 'ML Engineer', apply a 40% penalty.
+        2. EVIDENCE CHECK: Only give points for skills explicitly stated with context.
+        3. SCORING: 0-40 (Poor), 41-70 (Average), 71-100 (Exceptional).
 
+        Return ONLY a JSON object:
+        {{
+            "final_score": int,
+            "matched_keywords": ["list"],
+            "explanation": {{
+                "strengths": "Technical assets found",
+                "weaknesses": "CRITICAL GAPS: Why this candidate is a mismatch...",
+                "verdict": "A blunt professional summary of the alignment."
+            }}
+        }}
+        Resume: {resume_text[:4000]} | JD: {jd_text[:2000]}
+        """
         try:
             response = self.client.models.generate_content(
-                model=model_name, contents=prompt,
+                model="gemini-2.5-flash-lite", contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             return json.loads(response.text)
-        except Exception as e:
-            print(f"⚠️ Gemini Error: {e}")
-            # --- IMPROVED DYNAMIC FALLBACK ---
-            # Instead of a fixed message, we provide a generic but professional assessment
-            return {
-                "final_score": 40, # Low default for safety
-                "explanation": {
-                    "strengths": "Basic technical terminology found in resume.",
-                    "weaknesses": "Significant gaps in high-level requirements or missing documentation.",
-                    "verdict": "The candidate's profile shows a partial alignment with the role but lacks clear evidence of core technical mastery required for this position."
-                },
-                "matched_keywords": ["Manual Review Required"]
-            }
+        except:
+            return {"final_score": 30, "explanation": {"verdict": "System fallback due to limit."}, "matched_keywords": []}
+
+    def generate_final_verdict_xai(self, name, ats_data, behavior_data):
+        """Synthesizes all multimodal data into a forensic final decision."""
+        prompt = f"""
+        Act as a Senior Hiring Director. Provide a final decision for {name}.
+        
+        DATA:
+        - ATS Match: {ats_data.get('final_score')}%
+        - Interview Knowledge Accuracy: {behavior_data.get('relevance_score')*100}%
+        - Confidence Level: {behavior_data.get('hume_confidence')*100}%
+        - Attention/Focus: {behavior_data.get('attention')*100}%
+        - Transcript: {behavior_data.get('transcript')}
+
+        TASK:
+        1. Compare the Transcript against the Job Field. If the candidate talked about unrelated topics (e.g., talked about ML for a BA job), REJECT THEM.
+        2. Explain the discrepancy between technical match and behavioral performance.
+        3. Write a 3-sentence verdict.
+        """
+        try:
+            response = self.client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+            return response.text.strip()
+        except:
+            return "Manual review required: Candidate signals are inconsistent with the job role."
     def generate_questions_from_jd(self, jd_text):
         """MSc Phase 8: Standardized Technical Interview Generation."""
         prompt = f"Act as an Interviewer. Generate 3 technical questions for this JD: {jd_text[:1500]}. Question 1 must be an intro. Format as numbered list."
         try:
-            response = self.client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+            response = self.client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
             return response.text.strip()
         except: return "1. Please introduce yourself.\n2. What are your key technical strengths?\n3. Why do you want this role?"
         
         
     def generate_final_verdict_xai(self, name, ats_score, behavior_score, behavior_grade, strengths, gaps, integrity, transcript):
         """
-        MSc XAI Logic: Fuses document and behavioral data into a narrative verdict.
+        Fuses all multimodal data into a human-like final hiring verdict.
         """
         prompt = f"""
-        Act as a Senior Recruitment Consultant. Write a 3-sentence 'Final Hiring Verdict' for {name}.
+        Act as a Senior Recruitment Director. Write a 3-sentence 'Final Hiring Verdict' for {name}.
         
-        DATA:
-        - Technical Match (Resume vs JD): {ats_score}%
-        - Behavioral Score (Interview): {behavior_score}% (Grade: {behavior_grade})
-        - Integrity Status: {integrity}
-        - Top Strengths found: {strengths}
-        - Technical Gaps: {gaps}
-        - Interview Transcript Summary: {transcript[:300]}...
+        CANDIDATE DATA:
+        - Technical Match (ATS): {ats_score}%
+        - Behavioral Score: {behavior_score}% (Grade: {behavior_grade})
+        - Integrity Audit: {integrity}
+        - Identified Strengths: {strengths}
+        - Critical Technical Gaps: {gaps}
+        - Interview Speech Excerpt: {transcript[:400]}...
 
         TASK:
-        Explain exactly why the candidate got their suitability score. 
-        If the score is low (like 44/100), be professional but honest about the gaps.
-        Mention if their behavior (confidence/focus) matched their technical skills.
+        Explain the suitability of the candidate. 
+        - If technical match is low but behavior is high, mention 'potential but needs training'.
+        - If technical knowledge (relevance) was low during the interview, be critical.
+        - If attention was low, mention 'lack of focus'.
         
-        OUTPUT: Return only the 3-sentence paragraph.
+        OUTPUT: Return only the 3-sentence professional paragraph.
         """
         try:
             response = self.client.models.generate_content(
@@ -99,5 +127,6 @@ class ATSMatcher:
                 contents=prompt
             )
             return response.text.strip()
-        except:
-            return f"Candidate {name} shows a {behavior_grade} level of interview performance with a {ats_score}% technical match. Further manual review of the detected technical gaps is recommended."    
+        except Exception as e:
+            print(f"Verdict Error: {e}")
+            return f"Candidate {name} shows a {behavior_grade} level of interview performance. Technical alignment is at {ats_score}%. A secondary technical review is suggested to address identified gaps."

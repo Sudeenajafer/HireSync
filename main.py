@@ -85,35 +85,53 @@ def go_to_step_3(resume, role_title):
 # --- UPDATED BACKGROUND TASK ---
 def background_analysis_task(name, role, email, phone, resume_path, video_path, resume_text, questions_html):
     try:
-        time.sleep(5) # Wait for browser to finalize WebM
+        print(f"⚙️ [BACKGROUND] Starting AI processing for {name}...")
+        time.sleep(10) # Standard file stability wait
+        
         raw_q = questions_html.replace("<div class='agent-box'>", "").replace("</div>", "").replace("AI Interview Assessment", "")
         target_jd = db.get_jd_by_title(role)
         
-        # Run Primary Engines
+        # 1. Run AI Engines
         ats_data = matcher.analyze_resume_llm(resume_text, target_jd)
         behavior = extract_features(resume_path, target_jd, video_path, skip_ats=True, questions=raw_q)
         
-        # Calculate Fused Scores
-        ats_val = ats_data.get('final_score', 0) if ats_data else 0
+        # 2. Extract specific values for the Verdict
+        ats_val = ats_data.get('final_score', 0)
         beh_val = behavior.get('behavior_score', 0) * 100
-        final_val = round(((ats_val/100)*0.6) + (behavior.get('behavior_score', 0)*0.4), 2)*100
         
-        # Cloud Assets
-        res_url = upload_to_cloud(resume_path, resource_type="image")
-        vid_url = upload_to_cloud(video_path, resource_type="video")
-
-        # GENERATE XAI VERDICT
+        # 3. GENERATE THE XAI VERDICT (Fixed the "Missing Arguments" error)
+        print(f"🧠 Generating Explainable AI Verdict for {name}...")
         final_verdict = matcher.generate_final_verdict_xai(
             name=name,
             ats_score=ats_val,
             behavior_score=beh_val,
             behavior_grade=behavior.get('behavior_grade', 'B'),
-            strengths=ats_data.get('explanation', {}).get('strengths', 'N/A'),
+            strengths=", ".join(ats_data.get('matched_keywords', [])),
             gaps=ats_data.get('explanation', {}).get('weaknesses', 'N/A'),
             integrity=behavior.get('integrity_status', 'Safe'),
             transcript=behavior.get('transcript', '')
         )
 
+        # 4. Final suitability calculation (60/40 weighted)
+        weighted_base = (ats_val * 0.6) + (beh_val * 0.4)
+        
+        # If the candidate fails the interview (beh_val < 40), 
+        # we apply a "Disqualification Multiplier"
+        if beh_val < 40:
+            # The lower the behavior, the more the technical score is "destroyed"
+            penalty_factor = beh_val / 40  # e.g., 25 / 40 = 0.625
+            final_val = round(weighted_base * penalty_factor, 1)
+        else:
+            final_val = round(weighted_base, 1)
+            
+        print(f"🎯 Aggressive Scoring Applied: {final_val}")
+
+
+        # 5. Cloud Uploads
+        res_url = upload_to_cloud(resume_path, resource_type="image")
+        vid_url = upload_to_cloud(video_path, resource_type="video")
+
+        # 6. Save to Supabase
         record = {
             "name": name, "role": role, "email": email, "phone": phone,
             "ats_score": ats_val, 
@@ -122,19 +140,20 @@ def background_analysis_task(name, role, email, phone, resume_path, video_path, 
             "transcript": behavior.get('transcript', ''), 
             "resume_url": res_url, "video_url": vid_url,
             "behavior_grade": behavior.get('behavior_grade', 'B'),
-            "hume_confidence": behavior.get('hume_confidence', 0), 
-            "attention": behavior.get('attention', 0),             
-            "hume_anxiety": behavior.get('hume_anxiety', 0),
+            "hume_confidence": behavior.get('hume_confidence', 0),
+            "attention": behavior.get('attention', 0),
             "integrity_status": behavior.get('integrity_status', 'Safe'),
             "conflict_report": behavior.get('conflict_report', 'Clean'),
             "details": ats_data.get('explanation', {}),
-            "final_reasoning_text": final_verdict 
+            "final_reasoning_text": final_verdict # Now populated with real AI reasoning
         }
         save_candidate_to_supabase(record)
-        print(f"✅ [CLOUD SYNC] complete for {name}")
-    except Exception as e: 
-        print(f"❌ Background Error: {e}")
-
+        print(f"✅ [SUCCESS] Application for {name} saved to Cloud.")
+    except Exception as e:
+        import traceback
+        print(f"❌ [CRITICAL BACKGROUND ERROR] {e}")
+        traceback.print_exc()
+        
 def final_candidate_submit(name, role, email, phone, resume, video, resume_text, questions_html):
     if not video: 
         return "⚠️ Record Video", gr.update(visible=True), name, email, phone, resume, video

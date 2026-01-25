@@ -32,13 +32,14 @@ def audio_phase_score(video_path):
         # 2. UNIVERSAL EXTRACTION COMMAND
         cmd = [
             'ffmpeg', '-y', 
+            '-err_detect', 'ignore_err', 
+            '-ignore_unknown',
             '-i', video_path,
-            '-vn',                    
-            '-ac', '1',               
-            '-ar', '16000',           
-            '-acodec', 'pcm_s16le',   
+            '-vn', '-map', '0:a:0', 
+            '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', 
             temp_wav
         ]
+
         
         subprocess.run(cmd, capture_output=True, text=True)
 
