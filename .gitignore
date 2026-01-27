@@ -1,24 +1,61 @@
-@"
+# --- Virtual Environments ---
 venv/
-__pycache__/
-*.pyc
-*.pyd
-*.dll
-*.exe
-*.csv
-.DS_Store
-"@ | Out-File .gitignore -Encoding utf8
 env/
+.venv/
+env.bak/
+venv.bak/
 
+# --- Secrets & Config (CRITICAL) ---
+.env
+*.env
+secrets.json
 
+# --- Python Bytecode & Cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Databases (Local Storage) ---
+*.db
+*.sqlite
+hiresync_local.db
+hiresync_enterprise.db
+
+# --- Media Files (Privacy & Storage) ---
+# We ignore these because they contain candidate recordings and take up too much space
 *.wav
 *.mp4
 *.webm
+*.mov
 audio_extract_*.wav
 v_audio_*.wav
+temp_*.wav
+processed_*.mp4
+rescue_audio_*.wav
 
-# AI Models (too big for GitHub)
+# --- AI Models & Large Assets ---
+# These are usually too large for Git and should be downloaded separately
 face_landmarker.task
+*.task
+*.onnx
+*.pb
 
-# Gradio cache
+# --- Operating System Files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Gradio & App Temp Files ---
 gradio_cached/
+flagged/
+*.log
+output.log
+
+# --- Executables & Installers ---
+*.exe
+*.dll
+*.msi
