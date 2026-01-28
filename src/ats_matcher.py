@@ -93,7 +93,7 @@ class ATSMatcher:
         """MSc Phase 8: Standardized Technical Interview Generation."""
         prompt = f"Act as an Interviewer. Generate 3 technical questions for this JD: {jd_text[:1500]}. Question 1 must be an intro. Format as numbered list."
         try:
-            response = self.client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+            response = self.client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
             return response.text.strip()
         except: return "1. Please introduce yourself.\n2. What are your key technical strengths?\n3. Why do you want this role?"
         

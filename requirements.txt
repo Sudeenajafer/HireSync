@@ -1,6 +1,31 @@
-sentence-transformers==3.1.1
-PyMuPDF==1.24.10
-nltk==3.8.1
-torch==2.4.1
+# --- Core Framework & GUI ---
+gradio==5.9.1
 pandas==2.2.3
 numpy==2.1.1
+python-dotenv
+
+# --- AI & NLP (Phase 1, 6 & 8) ---
+google-genai
+sentence-transformers==3.1.1
+nltk==3.8.1
+textblob
+torch==2.4.1
+
+# --- Audio & Transcription (Phase 2) ---
+openai-whisper
+librosa
+static-ffmpeg
+soundfile
+
+# --- Computer Vision & Emotion (Phase 3, 4 & 5) ---
+mediapipe
+opencv-python
+hume
+
+# --- Cloud & Database (Persistence) ---
+supabase
+cloudinary
+
+# --- Document Processing ---
+PyPDF2
+PyMuPDF==1.24.10

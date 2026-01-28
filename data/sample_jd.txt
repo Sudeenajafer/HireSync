@@ -1,2 +1,0 @@
-Job: ML Engineer
-Requirements: Experience with Python, deep learning frameworks like TensorFlow, model deployment on cloud platforms.
