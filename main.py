@@ -45,13 +45,53 @@ footer { display: none !important; }
 """
 
 # --- HR LOGIC: VACANCY MANAGEMENT ---
-def hr_create_job(title, jd_text, manual_q):
-    if not title or not jd_text: 
-        return "⚠️ Error: Title/JD required.", gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+def hr_create_job(title, jd_text, vacancies, manual_q):
+    if not title or not jd_text:
+        return "⚠️ Error: Title and JD are required.", gr.update(), gr.update()
+    
+    # Pass vacancies to the database
     questions = manual_q if manual_q.strip() else matcher.generate_questions(jd_text)
-    db.add_job(title, jd_text, questions)
+    db.add_job(title, jd_text, vacancies, questions)
+    
     new_choices = db.get_job_titles()
-    return (f"✅ Position '{title}' published!", "", "", "", gr.update(choices=new_choices), gr.update(choices=new_choices), gr.update(choices=new_choices))
+    return f"✅ Position '{title}' published with {vacancies} vacancies!", gr.update(choices=new_choices), gr.update(choices=new_choices)
+
+def update_hr_applicant_view(selected_role):
+    """
+    Creates a unified applicant view, fetching all applicants for the role,
+    sorting them by final score, and returning them.
+    Highlighting will be handled by the UI level or styled DataFrame.
+    """
+    if not selected_role or selected_role == "No Positions Available":
+        empty_df = pd.DataFrame(columns=["Status"], data=[["Select a position"]])
+        return empty_df
+
+    # Fetch K value for the role
+    k = db.get_vacancy_count(selected_role)
+    
+    # Get Dataframe of all applicants sorted
+    full_pool = db.get_candidates_by_role(selected_role)
+    
+    if full_pool.empty:
+        return full_pool
+
+    # Highlight the top K rows using pandas styler
+    # We apply a background color to the first K rows in the dataframe.
+    def highlight_top_k(df, top_k):
+        # Create an empty DataFrame of styles with same shape and index
+        styles = pd.DataFrame('', index=df.index, columns=df.columns)
+        # Apply style to the first K rows
+        if len(df) > 0:
+            # only highlight rows that exist, bounded by k
+            highlight_count = min(top_k, len(df))
+            highlight_idx = df.index[:highlight_count]
+            styles.loc[highlight_idx, :] = 'background-color: #064e3b; color: #34d399; font-weight: bold;'
+        return styles
+
+    # Return styled dataframe
+    styled_df = full_pool.style.apply(highlight_top_k, top_k=k, axis=None)
+    
+    return styled_df
 
 def hr_delete_job(title):
     if not title or title == "No Positions Available": 
@@ -254,24 +294,27 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="HireSync AI Pro") 
         # PORTAL 2: HR ADMIN
         with gr.TabItem("🏢 HR ADMIN PORTAL"):
             with gr.Tabs() as hr_tabs:
+                # Publish Job Sub-tab
                 with gr.TabItem("➕ Publish Job", id=1):
                     with gr.Column(elem_classes="hr-box"):
                         h_title = gr.Textbox(label="Job Title")
-                        h_jd = gr.Textbox(label="JD", lines=4)
-                        h_q = gr.Textbox(label="Questions", lines=1)
-                        h_btn = gr.Button("Publish")
+                        h_jd = gr.Textbox(label="Job Description", lines=4)
+                        # ADDED: Vacancy Number Input
+                        h_vacancies = gr.Number(label="Number of Vacancies (K)", value=1, precision=0)
+                        h_q = gr.Textbox(label="Custom Questions", lines=1)
+                        h_btn = gr.Button("Publish Position", variant="primary")
                         h_status = gr.Markdown("")
-                with gr.TabItem("📋 Manage Vacancies", id=2):
-                    with gr.Column(elem_classes="hr-box"):
-                        hr_job_refresh = gr.Button("🔄 REFRESH")
-                        hr_job_table = gr.Dataframe()
-                        hr_delete_select = gr.Dropdown(label="Delete Position", choices=db.get_job_titles())
-                        hr_delete_btn = gr.Button("DELETE", variant="stop")
-                        hr_delete_status = gr.Markdown("")
+
+                # Applicant List Sub-tab
                 with gr.TabItem("📊 Applicant List", id=3):
-                    hr_view_selector = gr.Dropdown(label="Filter Role", choices=db.get_job_titles())
-                    hr_refresh_list = gr.Button("🔄 LOAD")
-                    hr_main_table = gr.Dataframe(headers=["Name", "Role", "Score", "Date", "Analysis"], interactive=False)
+                    with gr.Row():
+                        hr_view_selector = gr.Dropdown(label="Select Role to View", choices=db.get_job_titles())
+                        hr_refresh_list = gr.Button("🔄 LOAD ALL DATA", variant="secondary")
+                    
+                    gr.Markdown("---")
+                    gr.Markdown("### 👥 Applicant Pool (Top Candidates Highlighted)")
+                    hr_main_table = gr.Dataframe(interactive=False, type="pandas")
+
                 with gr.TabItem("🔍 Deep Review", id=4, visible=False) as deep_review_tab:
                     with gr.Column(elem_classes="hr-box"):
                         hr_back_btn = gr.Button("⬅️ BACK TO LIST")
@@ -289,16 +332,22 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="HireSync AI Pro") 
                                 hr_transcript_display = gr.Textbox(label="Full Transcription", lines=12)
 
     # --- ACTION MAPPINGS ---
-    h_btn.click(hr_create_job, [h_title, h_jd, h_q], [h_status, h_title, h_jd, h_q, c_role, hr_view_selector, hr_delete_select])
-    hr_job_refresh.click(db.get_all_positions_df, outputs=[hr_job_table])
-    hr_delete_btn.click(hr_delete_job, [hr_delete_select], [hr_delete_status, c_role, hr_delete_select, hr_view_selector])
+    h_btn.click(hr_create_job, [h_title, h_jd, h_vacancies, h_q], [h_status, c_role, hr_view_selector])
+
+    # HR: Dynamic List Loading (Updates main table)
+    hr_refresh_list.click(
+        fn=update_hr_applicant_view,
+        inputs=[hr_view_selector],
+        outputs=[hr_main_table]
+    )
+
+
     
     login_btn.click(go_to_step_2, [c_name, c_role], [step_1_ui, step_2_ui, c_status])
     upload_btn.click(go_to_step_3, [c_res, c_role], [step_2_ui, step_3_ui, c_status, c_q_area, res_txt_state])
     c_vid.change(show_processing_warning, [c_vid], [c_wait_msg])
     submit_btn.click(final_candidate_submit, [c_name, c_role, c_email, c_phone, c_res, c_vid, res_txt_state, c_q_area], [c_status, step_1_ui, c_name, c_email, c_phone, c_res, c_vid]).then(lambda: [gr.update(visible=False), gr.update(visible=False)], None, [step_3_ui, c_wait_msg])
 
-    hr_refresh_list.click(lambda r: db.get_candidates_by_role(r), [hr_view_selector], [hr_main_table])
     hr_main_table.select(handle_applicant_selection, [hr_main_table], [hr_transcript_display, hr_integrity_box, hr_ats_display, hr_interview_display, hr_suitability_display, hr_contact_info, hr_name_display, deep_review_tab, hr_tabs, hr_real_name_state]).then(load_full_candidate_info, [hr_real_name_state], [hr_transcript_display, hr_integrity_box, hr_ats_display, hr_interview_display, hr_suitability_display, hr_contact_info, hr_name_display])
     hr_reload_btn.click(load_full_candidate_info, [hr_real_name_state], [hr_transcript_display, hr_integrity_box, hr_ats_display, hr_interview_display, hr_suitability_display, hr_contact_info, hr_name_display])
     hr_back_btn.click(lambda: [gr.update(visible=False), gr.Tabs(selected=3)], outputs=[deep_review_tab, hr_tabs])
